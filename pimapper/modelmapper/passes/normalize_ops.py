@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any, Type
 
 from pimapper.core.graph.base import NxComputationGraph
-from pimapper.core.graph.ops.base import Op, OpMetadata
+from pimapper.core.graph.ops.base import Op
 from pimapper.core.graph.ops.torch_compat import TorchFxOp
 from pimapper.modelmapper.passes.base import Pass
 
@@ -127,46 +127,15 @@ class NormalizeOpsPass(Pass):
         return converted_count > 0
 
     def _try_convert_op(self, op: TorchFxOp) -> Op | None:
-        """尝试将 Op 转换为原生操作
-
-        Args:
-            op: TorchFxOp 实例
-
-        Returns:
-            转换后的原生 op，如果无法转换则返回 None
-        """
-        # Get the torch operation type and target
-        op_type = op.op_type
-        target = op.target
-
-        # 遍历所有已注册的 op 类
+        """尝试将 Op 转换为原生操作"""
         for op_class in self._registered_ops:
             try:
-                # 检查是否可以转换，传入 metadata 以支持 call_module 识别
-                can_convert_method = op_class.can_convert_from_torch
-                # 尝试传入 metadata（如果方法支持的话）
-                try:
-                    can_convert = can_convert_method(op_type, target, metadata=op.metadata)
-                except TypeError:
-                    # 如果方法不支持 metadata 参数，使用旧的签名
-                    can_convert = can_convert_method(op_type, target)
-
-                if can_convert:
-                    # 执行转换
-                    return op_class.convert_from_torch(
-                        op=op_type,
-                        target=target,
-                        args=op.args,
-                        kwargs=op.kwargs,
-                        metadata=op.metadata,
-                    )
-            except Exception as e:
-                # 记录转换失败但继续尝试其他 op 类
-                self._metadata.setdefault("conversion_warnings", []).append(
-                    f"Op class {op_class.__name__} failed to convert op: {str(e)}"
-                )
+                native_op = op_class.convert_from_torch(op)
+                # 保留原 op 的 results
+                native_op.results = op.results
+                return native_op
+            except Exception:
                 continue
-
         return None
 
     def _update_node_with_op(

@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Optional
 
-from pimapper.core.graph.ops.base import Op, OpMetadata
+from pimapper.core.graph.ops.base import Op
 
 
 @dataclass
@@ -88,27 +88,8 @@ class FusionMatrixOp(Op):
 
     op_type: ClassVar[str] = "fusion_matrix"
 
-    def __init__(
-        self,
-        shared_inputs: list[str],
-        fusion_strategy: str = "sequential",
-        *,
-        metadata: Optional[OpMetadata] = None,
-    ):
-        """初始化融合矩阵
-
-        Args:
-            shared_inputs: 共享的输入节点名称
-            fusion_strategy: 融合策略
-                - 'sequential': 按最晚开工时间顺序执行
-                - 'interleaved': 时间相同的矩阵交错执行
-            metadata: 元数据（可选）
-        """
-        super().__init__(
-            args=tuple(shared_inputs),
-            kwargs={"fusion_strategy": fusion_strategy},
-            metadata=metadata,
-        )
+    def __init__(self, shared_inputs: list[str], fusion_strategy: str = "sequential"):
+        super().__init__(args=tuple(shared_inputs), kwargs={"fusion_strategy": fusion_strategy})
         self.shared_inputs = shared_inputs
         self.fused_matrices: list[MatrixFusionInfo] = []
         self.fusion_strategy = fusion_strategy
@@ -196,46 +177,6 @@ class FusionMatrixOp(Op):
         """
         return len(self.fused_matrices)
 
-    def to_dict(self) -> dict[str, Any]:
-        """转换为字典格式（用于序列化）
-
-        Returns:
-            包含融合信息的字典
-        """
-        data = super().to_dict()
-        data["shared_inputs"] = self.shared_inputs
-        data["fusion_strategy"] = self.fusion_strategy
-        data["fused_matrices"] = [m.to_dict() for m in self.fused_matrices]
-        return data
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> FusionMatrixOp:
-        """从字典格式创建实例
-
-        Args:
-            data: 包含融合信息的字典
-
-        Returns:
-            FusionMatrixOp 实例
-        """
-        metadata = OpMetadata(
-            shape=data.get("metadata", {}).get("shape"),
-            dtype=data.get("metadata", {}).get("dtype"),
-            custom=data.get("metadata", {}).get("custom", {}),
-        )
-
-        op = cls(
-            shared_inputs=data["shared_inputs"],
-            fusion_strategy=data.get("fusion_strategy", "sequential"),
-            metadata=metadata,
-        )
-
-        # 恢复融合的矩阵信息
-        for matrix_data in data.get("fused_matrices", []):
-            matrix_info = MatrixFusionInfo.from_dict(matrix_data)
-            op.fused_matrices.append(matrix_info)
-
-        return op
 
     def __repr__(self) -> str:
         return (

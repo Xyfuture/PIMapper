@@ -10,7 +10,7 @@ from torch.nn.modules import Module
 
 from pimapper.core.graph.base import NxComputationGraph
 from pimapper.model.base import RotaryPositionEmbedding, load_model_config, initialize_module
-from pimapper.core.graph.ops.base import OpMetadata
+from pimapper.core.graph.ops.base import GraphTensor
 from pimapper.core.graph.ops.torch_compat import create_torch_op_from_fx
 from pimapper.modelmapper.passes.normalize_ops import NormalizeOpsPass
 from pimapper.modelmapper.passes.simplify import SimplifyGraphPass
@@ -146,41 +146,27 @@ def fx_to_computation_graph(graph: fx.Graph, module: Optional[torch.nn.Module] =
 
         if node.op == 'call_module' and node.target in modules:
             target_module = modules[node.target]
-            # Add module class name
             meta['module_class'] = target_module.__class__.__name__
 
-            # Add weight shape information for linear modules
             if isinstance(target_module, torch.nn.Linear):
                 if hasattr(target_module, 'weight') and target_module.weight is not None:
                     meta['weight_shape'] = tuple(target_module.weight.shape)
                 if hasattr(target_module, 'bias') and target_module.bias is not None:
                     meta['bias_shape'] = tuple(target_module.bias.shape)
-                # Also store in/out features for convenience
                 meta['in_features'] = target_module.in_features
                 meta['out_features'] = target_module.out_features
-
-        # Create OpMetadata with shape and dtype information
-        op_metadata = OpMetadata(
-            shape=shape,
-            dtype=dtype,
-            custom=meta
-        )
 
         # Convert fx.Node references to string names in args and kwargs
         converted_args = convert_node_refs(node.args)
         converted_kwargs = convert_node_refs(node.kwargs)
 
         # Create torch_compat Op from fx node with converted args/kwargs
-        op = create_torch_op_from_fx(
-            node.op,
-            node.target,
-            args=converted_args,
-            kwargs=converted_kwargs,
-            metadata=op_metadata
-        )
+        op = create_torch_op_from_fx(node.op, node.target, args=converted_args, kwargs=converted_kwargs, metadata={"shape": shape, "dtype": dtype, "custom": meta})
+
+        # 设置 results，目前所有 op 都只有一个输出
+        op.results = [GraphTensor(shape=shape, dtype=dtype)]
 
         # Create node in computation graph with Op object
-        # Edges will be automatically created from op.get_input_refs()
         comp_graph.create_node(name=node.name, op=op)
 
     return comp_graph
@@ -236,197 +222,15 @@ def build_computation_graph(
     return graph, comp_graph
 
 
-def simplify_computation_graph(graph: NxComputationGraph) -> NxComputationGraph:
-    """简化计算图，保留核心操作并过滤掉不必要的操作。
-
-    保留的操作类型：
-    1. 神经网络模块 (call_module):
-       - 线性层、注意力层、归一化层等核心计算模块
-       - 过滤掉 view-like 模块（如 reshape、flatten 等）
-
-    2. 核心张量操作 (call_function):
-       - 激活函数: silu, sigmoid, tanh, relu, gelu
-       - 基础线性代数: add, sub, mul, div, matmul, bmm
-       - 向量操作: sum, mean, max, min
-       - RoPE相关: sin, cos (旋转位置编码)
-       - 基础形状操作: transpose, permute, contiguous
-       - 索引操作: index_select, gather, scatter
-
-    3. 方法调用 (call_method):
-       - 张量方法: add, sub, mul, div, matmul
-       - 聚合方法: sum, mean, max, min
-       - 形状方法: transpose, permute, contiguous
-       - 索引方法: index_select, gather, scatter
-       - 查询方法: size, shape
-
-    4. 输入占位符 (placeholder):
-       - 模型输入节点
-
-    过滤掉的操作：
-    - 视图操作: view, reshape, flatten, squeeze, unsqueeze
-    - 扩展操作: expand, repeat, tile
-    这些操作不改变实际数据，只是改变张量的视图或形状
-
-    注意：此函数现在在原图上进行修改，使用 replace_input 和 replace_uses 来删除节点
-    """
-    # 定义需要保留的核心操作类型
-    ESSENTIAL_OPERATIONS = {
-        # 神经网络模块 - 模型的核心计算组件
-        'call_module',
-
-        # 核心张量操作 - 数学运算和函数调用
-        'call_function',
-        'call_method',
-        'output',
-
-        # 占位符节点 - 模型输入
-        'placeholder'
-    }
-
-    # 定义需要保留的具体函数 (基础线性向量运算)
-    ESSENTIAL_FUNCTIONS = {
-        # 激活函数 - 非线性变换核心
-        'silu', 'sigmoid', 'tanh', 'relu', 'gelu',
-
-        # 基础线性代数运算
-        'add', 'sub', 'mul', 'div', 'matmul', 'bmm',
-
-        # 向量聚合操作
-        'sum', 'mean', 'max', 'min',
-
-        # RoPE (旋转位置编码) 相关三角函数
-        'sin', 'cos',
-
-        # 基础形状操作 (保留改变数据排列的操作，过滤视图操作)
-        # 'transpose', 'permute', 'contiguous',
-
-        # 索引和切片操作
-        # 'index_select', 'gather', 'scatter'
-    }
-
-    # 定义需要保留的特定方法
-    ESSENTIAL_METHODS = {
-        # 张量运算方法
-        'add', 'sub', 'mul', 'div', 'matmul',
-        # 聚合方法
-        'sum', 'mean', 'max', 'min',
-        # 形状变换方法
-        # 'transpose', 'permute', 'contiguous',
-        # 索引操作方法
-        # 'index_select', 'gather', 'scatter',
-        # 'size', 'shape'  # 形状查询方法
-    }
-
-    # 定义需要过滤掉的操作 (不改变实际数据的视图操作)
-    FILTERED_OPERATIONS = {
-        'view', 'reshape', 'flatten', 'squeeze', 'unsqueeze',  # 视图操作
-        'expand', 'repeat', 'tile',  # 扩展和重复操作
-        'transpose', 'permute', 'contiguous',  # 形状变换操作
-        'getattr', 'getitem', 'setitem',  # 属性访问和索引操作
-    }
-
-    def should_keep_node(node_name: str) -> bool:
-        """判断节点是否应该保留"""
-        op = graph.node_record(node_name)
-        op_type = op.op_type
-
-        if op_type not in ESSENTIAL_OPERATIONS:
-            return False
-
-        if op_type == 'call_module':
-            # 始终保留模块，但过滤掉视图类模块
-            target = getattr(op, 'module_name', None) or getattr(op, 'target', None)
-            if isinstance(target, str) and any(filtered in target.lower() for filtered in FILTERED_OPERATIONS):
-                return False
-            return True
-
-        elif op_type == 'call_function':
-            target = getattr(op, 'target', None)
-            target_str = str(target).lower() if target else ''
-
-            # 检查是否为保留的特定函数
-            if any(essential in target_str for essential in ESSENTIAL_FUNCTIONS):
-                return True
-
-            # 检查是否包含过滤操作
-            if any(filtered in target_str for filtered in FILTERED_OPERATIONS):
-                return False
-
-            # 其他函数默认过滤
-            return False
-
-        elif op_type == 'call_method':
-            target = getattr(op, 'method_name', None) or getattr(op, 'target', None)
-            target_str = str(target).lower() if target else ''
-
-            # 检查是否为保留的特定方法
-            if any(essential in target_str for essential in ESSENTIAL_METHODS):
-                return True
-
-            # 检查是否包含过滤操作
-            if any(filtered in target_str for filtered in FILTERED_OPERATIONS):
-                return False
-
-            # 其他方法默认过滤
-            return False
-
-        elif op_type == 'placeholder':
-            return True
-
-        return False
-
-    # 第一遍：标记需要删除的节点
-    nodes_to_remove = []
-    for node_name in graph.nodes(sort=False):
-        if not should_keep_node(node_name):
-            nodes_to_remove.append(node_name)
-
-    # 简化计算图：准备删除 {len(nodes_to_remove)} 个节点
-
-    # 第二遍：安全删除节点，使用 replace_input 和 replace_uses
-    removed_count = 0
-    for node_name in nodes_to_remove:
-        if node_name not in graph.graph:  # 节点可能已经被删除
-            continue
-
-        op = graph.node_record(node_name)
-        op_type = op.op_type
-        target = getattr(op, 'target', None)
-
-        # 获取节点的前驱和后继
-        predecessors = list(graph.predecessors(node_name))
-        successors = list(graph.successors(node_name))
-
-        # 正在删除节点 '{node_name}'
-
-        if op_type == 'call_function' and any(filtered in str(target).lower() for filtered in {'getattr', 'getitem', 'setitem'}):
-            graph.remove_node(node_name, safe=False)
-            removed_count += 1
-            continue
-
-        if len(predecessors) == 0:
-            graph.remove_node(node_name, safe=False)
-            removed_count += 1
-        elif len(predecessors) == 1:
-            graph.replace_uses(node_name, predecessors[0])
-            graph.remove_node(node_name, safe=False)
-            removed_count += 1
-        else:
-            # >=1
-            assert False, f"节点 '{node_name}' 前驱数量大于 1，请检查逻辑"
-
-    # 简化完成：共删除了 {removed_count} 个节点
-    return graph
 
 
 def summarize_graph(graph: NxComputationGraph) -> list[str]:
     lines: list[str] = []
     for name in graph.nodes():
         op = graph.node_record(name)
-        shape = op.metadata.shape if op.metadata else None
-        dtype = op.metadata.dtype if op.metadata else None
+        shape = op.results[0].shape if op.results else None
+        dtype = op.results[0].dtype if op.results else None
 
-        # 获取后继节点
         successors = list(graph.successors(name))
         if successors:
             succ_str = ", ".join(successors)

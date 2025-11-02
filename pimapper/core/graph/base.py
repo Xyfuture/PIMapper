@@ -123,8 +123,21 @@ class NxComputationGraph:
         order = self._next_order()
         self.graph.add_node(name, op=op, order=order)
 
-        # Create edges from input references
-        input_refs = op.get_input_refs()
+        # Create edges from input references in args/kwargs
+        input_refs = []
+        def extract_refs(obj):
+            if isinstance(obj, str):
+                input_refs.append(obj)
+            elif isinstance(obj, (tuple, list)):
+                for item in obj:
+                    extract_refs(item)
+            elif isinstance(obj, dict):
+                for value in obj.values():
+                    extract_refs(value)
+
+        extract_refs(op.args)
+        extract_refs(op.kwargs)
+
         for src in input_refs:
             if src in self.graph:
                 self.graph.add_edge(src, name)
@@ -310,25 +323,19 @@ class NxComputationGraph:
             if not self.graph.has_edge(keep, succ):
                 self.graph.add_edge(keep, succ)
 
-        # Merge metadata
+        # Merge metadata if exists
         keep_op = self.graph.nodes[keep]["op"]
         remove_op = self.graph.nodes[remove]["op"]
-        for key, value in remove_op.metadata.custom.items():
-            keep_op.metadata.custom.setdefault(key, value)
+        if hasattr(remove_op, 'metadata') and isinstance(remove_op.metadata, dict):
+            if hasattr(keep_op, 'metadata') and isinstance(keep_op.metadata, dict):
+                keep_op.metadata.setdefault('custom', {}).update(remove_op.metadata.get('custom', {}))
 
         self.remove_node(remove, safe=False)
 
     def update_meta(self, name: str, **meta_updates: Any) -> None:
-        """更新节点的元数据
-
-        Args:
-            name: 节点名称
-            **meta_updates: 要更新的元数据键值对
-
-        Raises:
-            KeyError: 当节点不存在时
-        """
+        """更新节点的元数据"""
         if name not in self.graph:
             raise KeyError(f"Node '{name}' not found")
         op = self.graph.nodes[name]["op"]
-        op.metadata.custom.update(meta_updates)
+        if hasattr(op, 'metadata') and isinstance(op.metadata, dict):
+            op.metadata.setdefault('custom', {}).update(meta_updates)

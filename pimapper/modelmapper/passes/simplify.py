@@ -208,47 +208,25 @@ class SimplifyGraphPass(Pass):
         return False
 
     def _remove_node_safely(self, graph: NxComputationGraph, node_name: str) -> bool:
-        """安全删除节点
-
-        根据节点的连接情况选择合适的删除策略：
-        - 无前驱节点：直接删除
-        - 单个前驱节点：使用 replace_uses 重定向后继节点，然后删除
-        - 多个前驱节点：暂不支持，返回 False
-
-        Args:
-            graph: 计算图
-            node_name: 要删除的节点名称
-
-        Returns:
-            True 如果成功删除，False 否则
-        """
+        """安全删除节点，维护 input_ops 和 results 的关系"""
         op = graph.node_record(node_name)
         op_type = op.op_type
         target = getattr(op, 'target', None)
 
-        # 获取节点的前驱和后继
         predecessors = list(graph.predecessors(node_name))
-        successors = list(graph.successors(node_name))
 
-        # 对于属性访问操作，直接删除
         if op_type == 'call_function' and any(
             filtered in str(target).lower() for filtered in {'getattr', 'getitem', 'setitem'}
         ):
             graph.remove_node(node_name, safe=False)
             return True
 
-        # 无前驱节点：直接删除
         if len(predecessors) == 0:
             graph.remove_node(node_name, safe=False)
             return True
-
-        # 单个前驱节点：重定向后继节点
         elif len(predecessors) == 1:
             graph.replace_uses(node_name, predecessors[0])
             graph.remove_node(node_name, safe=False)
             return True
-
-        # 多个前驱节点：暂不支持
         else:
-            # 这种情况需要更复杂的逻辑，暂不处理
             return False
