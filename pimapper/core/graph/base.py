@@ -339,3 +339,37 @@ class NxComputationGraph:
         op = self.graph.nodes[name]["op"]
         if hasattr(op, 'metadata') and isinstance(op.metadata, dict):
             op.metadata.setdefault('custom', {}).update(meta_updates)
+
+    def summarize(self) -> list[str]:
+        """生成图的摘要信息"""
+        lines: list[str] = []
+        for name in self.nodes():
+            op = self.graph.nodes[name]["op"]
+            shape = op.results[0].shape if op.results else None
+            dtype = op.results[0].dtype if op.results else None
+            lines.append(f"{name}: {op.op_type}")
+
+            if op.input_ops:
+                lines.append("  inputs:")
+                for input_op, rf in op.input_ops.items():
+                    in_shape = input_op.results[rf.index].shape if input_op.results else None
+                    in_dtype = input_op.results[rf.index].dtype if input_op.results else None
+                    rf_str = f"[{rf.index}]"
+                    if rf.transforms:
+                        rf_str += f" -> {' -> '.join(t.op_type for t in rf.transforms)}"
+                    lines.append(f"    - {input_op.op_type} {rf_str} {in_shape} {in_dtype}")
+
+            if hasattr(op, 'kwargs') and op.kwargs:
+                info_items = []
+                for k, v in op.kwargs.items():
+                    if v is not None and k not in ['transpose_a', 'transpose_b'] or v:
+                        info_items.append(f"{k}={v}")
+                if info_items:
+                    lines.append(f"  params: {', '.join(info_items)}")
+
+            lines.append(f"  output: {shape} {dtype}")
+            successors = list(self.graph.successors(name))
+            if successors:
+                lines.append(f"  -> [{', '.join(successors)}]")
+
+        return lines

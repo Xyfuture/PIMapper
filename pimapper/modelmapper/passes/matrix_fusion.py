@@ -1,54 +1,65 @@
 """矩阵融合 Pass
 
 将共享输入的矩阵运算融合，使用最晚开工时间算法优化执行顺序。
+使用合并树结构管理融合策略和输出提取。
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Any
 
 import networkx as nx
 
 from pimapper.core.graph.base import NxComputationGraph
-from pimapper.core.graph.ops.fusionmatrix import FusionMatrix
+from pimapper.core.graph.ops.base import Op, ResultFilter
+from pimapper.core.graph.ops.fusionmatrix import (
+    FusionMatrixOp,
+    FusionStrategy,
+    MergeTreeNode,
+)
 from pimapper.modelmapper.passes.base import Pass
 
 
 class MatrixFusionPass(Pass):
     """矩阵融合优化 Pass
 
-    识别共享相同输入的矩阵运算，并将它们融合为一个 FusionMatrix 节点。
+    识别共享相同输入的矩阵运算，并将它们融合为一个 FusionMatrixOp 节点。
     使用最晚开工时间（Latest Start Time）算法来确定融合后的执行顺序。
 
     算法流程：
-    1. 识别计算图中的矩阵运算节点（根据形状信息）
+    1. 识别计算图中的矩阵运算节点（根据 op_type 和形状信息）
     2. 找到共享输入的矩阵运算组
-    3. 计算每个节点的最晚开工时间
-    4. 为每组创建融合节点，按最晚开工时间排序
-    5. 改写计算图，替换原始节点
+    3. 计算每个节点的最晚开工时间（LST）
+    4. 为每组构建合并树，根据 LST 决定融合策略
+    5. 创建 FusionMatrixOp 节点并改写计算图
 
     时间计算假设：
-    - 矩阵运算（2D+张量运算）：时间 = 1
-    - 向量运算（1D 或标量运算）：时间 = 0
+    - 矩阵运算（matmul 等）：时间 = 1
+    - 其他运算：时间 = 0
+
+    融合策略选择：
+    - 如果多个矩阵的 LST 相同：使用 INTERLEAVED 策略（交错排布）
+    - 如果多个矩阵的 LST 不同：使用 SEQUENTIAL 策略（按 LST 升序排布）
     """
 
     def __init__(
         self,
-        fusion_strategy: str = "sequential",
         min_fusion_size: int = 2,
+        block_size: int = 64,
         *,
         name: str | None = None,
     ):
         """初始化矩阵融合 Pass
 
         Args:
-            fusion_strategy: 融合策略 ('sequential' 或 'interleaved')
             min_fusion_size: 最小融合大小，少于此数量的不融合
+            block_size: 交错模式下的块大小（列数）
             name: Pass 名称（可选）
         """
         super().__init__(name=name or "MatrixFusion", description="Fuse matrices with shared inputs")
-        self.fusion_strategy = fusion_strategy
         self.min_fusion_size = min_fusion_size
+        self.block_size = block_size
 
     def run(self, graph: NxComputationGraph) -> bool:
         """执行矩阵融合
@@ -101,9 +112,8 @@ class MatrixFusionPass(Pass):
         """识别矩阵运算节点
 
         根据以下条件判断是否为矩阵运算：
-        1. 是 call_function 或 call_method 或 call_module
-        2. 有形状信息且输出是 2D 及以上的张量
-        3. 不是纯粹的 reshape/view 操作
+        1. op_type 是 "matmul" 或其他矩阵运算类型
+        2. 有 results 信息且输出是 2D 及以上的张量
 
         Args:
             graph: 计算图
@@ -114,30 +124,25 @@ class MatrixFusionPass(Pass):
         matrix_nodes = []
 
         for node_name in graph.nodes(sort=True):
-            record = graph.node_record(node_name)
+            op = graph.node_record(node_name)
 
-            # 必须是函数/方法/模块调用 或者原生矩阵操作
-            op_type = getattr(record, 'op', None) or getattr(record, 'op_type', None)
-            if op_type not in ("call_function", "call_method", "call_module", "matmul"):
+            # 检查 op_type
+            op_type = getattr(op, 'op_type', None)
+            if op_type not in ("matmul",):
                 continue
 
-            # 必须有形状信息
-            shape = getattr(record.metadata, 'shape', None) if hasattr(record, 'metadata') else None
-            if not shape:
+            # 检查 results
+            if not hasattr(op, 'results') or not op.results:
+                continue
+
+            # 检查第一个输出的形状
+            first_result = op.results[0]
+            if not hasattr(first_result, 'shape') or not first_result.shape:
                 continue
 
             # 形状必须是 2D 及以上
-            if len(shape) < 2:
+            if len(first_result.shape) < 2:
                 continue
-
-            # 排除 reshape/view 类操作（仅对有target的节点）
-            if hasattr(record, 'target'):
-                target_str = str(record.target).lower()
-                if any(
-                    kw in target_str
-                    for kw in ["reshape", "view", "flatten", "squeeze", "unsqueeze", "transpose", "permute"]
-                ):
-                    continue
 
             matrix_nodes.append(node_name)
 
@@ -158,15 +163,19 @@ class MatrixFusionPass(Pass):
         groups: dict[tuple[str, ...], list[str]] = {}
 
         for node_name in matrix_nodes:
-            # 获取该节点的所有输入
-            predecessors = graph.predecessors(node_name)
+            # 获取该节点的所有输入（前驱节点）
+            predecessors = list(graph.predecessors(node_name))
 
-            # 过滤出真正的数据输入（排除 get_attr 等）
+            if not predecessors:
+                continue
+
+            # 过滤出数据输入（排除 get_attr 等）
             data_inputs = []
             for pred in predecessors:
-                pred_record = graph.node_record(pred)
-                pred_op_type = getattr(pred_record, 'op', None) or getattr(pred_record, 'op_type', None)
-                if pred_op_type in ("placeholder", "call_function", "call_method", "call_module", "rmsnorm", "silu", "softmax", "vector_mul"):
+                pred_op = graph.node_record(pred)
+                pred_op_type = getattr(pred_op, 'op_type', None)
+                # 排除 get_attr 和 output 节点
+                if pred_op_type not in ("get_attr", "output"):
                     data_inputs.append(pred)
 
             if not data_inputs:
@@ -185,12 +194,12 @@ class MatrixFusionPass(Pass):
         """计算每个节点的最晚开工时间
 
         使用关键路径方法（CPM）的反向遍历：
-        1. 首先计算最早开始时间（正向遍历）
-        2. 然后计算最晚开工时间（反向遍历）
+        1. 首先计算最早开始时间（EST）和最早完成时间（EFT）
+        2. 然后计算最晚完成时间（LFT）和最晚开工时间（LST）
 
         时间假设：
-        - 矩阵运算：时间 = 1
-        - 向量运算：时间 = 0
+        - 矩阵运算（matmul）：时间 = 1
+        - 其他运算：时间 = 0
 
         Args:
             graph: 计算图
@@ -203,8 +212,8 @@ class MatrixFusionPass(Pass):
         earliest_finish: dict[str, float] = {}
 
         for node_name in nx.topological_sort(graph.graph):
-            record = graph.node_record(node_name)
-            duration = self._get_node_duration(record)
+            op = graph.node_record(node_name)
+            duration = self._get_node_duration(op)
 
             # 最早开始时间 = max(所有前驱的最早完成时间)
             predecessors = graph.predecessors(node_name)
@@ -223,10 +232,16 @@ class MatrixFusionPass(Pass):
         # 获取所有输出节点
         output_nodes = []
         for n in graph.nodes():
-            record = graph.node_record(n)
-            op_type = getattr(record, 'op', None) or getattr(record, 'op_type', None)
+            op = graph.node_record(n)
+            op_type = getattr(op, 'op_type', None)
             if op_type == "output":
                 output_nodes.append(n)
+
+        # 如果没有 output 节点，使用所有没有后继的节点
+        if not output_nodes:
+            for n in graph.nodes():
+                if not graph.successors(n):
+                    output_nodes.append(n)
 
         # 对于输出节点，最晚完成时间 = 最早完成时间（必须按时完成）
         for node_name in output_nodes:
@@ -234,8 +249,8 @@ class MatrixFusionPass(Pass):
 
         # 反向拓扑排序
         for node_name in reversed(list(nx.topological_sort(graph.graph))):
-            record = graph.node_record(node_name)
-            duration = self._get_node_duration(record)
+            op = graph.node_record(node_name)
+            duration = self._get_node_duration(op)
 
             # 如果已经设置了 latest_finish（输出节点），跳过
             if node_name not in latest_finish:
@@ -254,18 +269,17 @@ class MatrixFusionPass(Pass):
 
         return latest_start
 
-    def _get_node_duration(self, record: Any) -> float:
+    def _get_node_duration(self, op: Op) -> float:
         """获取节点的执行时间
 
         Args:
-            record: 节点记录
+            op: Op 对象
 
         Returns:
             执行时间（矩阵运算=1，其他=0）
         """
-        # 如果有形状信息且是 2D 及以上，认为是矩阵运算
-        shape = getattr(record.metadata, 'shape', None) if hasattr(record, 'metadata') else None
-        if shape and len(shape) >= 2:
+        op_type = getattr(op, 'op_type', None)
+        if op_type == "matmul":
             return 1.0
         return 0.0
 
@@ -276,7 +290,7 @@ class MatrixFusionPass(Pass):
         shared_inputs: tuple[str, ...],
         latest_start_times: dict[str, float],
     ) -> bool:
-        """将一组矩阵融合为一个 FusionMatrix 节点
+        """将一组矩阵融合为一个 FusionMatrixOp 节点
 
         Args:
             graph: 计算图
@@ -287,107 +301,237 @@ class MatrixFusionPass(Pass):
         Returns:
             True 如果成功融合，False 否则
         """
-        # 创建 FusionMatrix
-        fusion = FusionMatrix(list(shared_inputs), fusion_strategy=self.fusion_strategy)
+        # 构建合并树
+        merge_tree = self._build_merge_tree(graph, nodes, latest_start_times)
 
-        # 添加所有矩阵到融合操作
-        for node_name in nodes:
-            record = graph.node_record(node_name)
-            lst = latest_start_times.get(node_name, 0.0)
-            op_type = getattr(record, 'op', None) or getattr(record, 'op_type', None)
+        if merge_tree is None:
+            return False
 
-            shape = getattr(record.metadata, 'shape', None) if hasattr(record, 'metadata') else None
-            dtype = getattr(record.metadata, 'dtype', None) if hasattr(record, 'metadata') else None
-            target = getattr(record, 'target', op_type)
-            args = getattr(record, 'args', ())
-            kwargs = getattr(record, 'kwargs', {})
-            fusion.add_matrix(
-                node_name=node_name,
-                target=target,
-                args=args,
-                kwargs=kwargs,
-                latest_start_time=lst,
-                shape=shape,
-                dtype=dtype,
-            )
-
-        # 根据最晚开工时间排序
-        fusion.sort_matrices()
+        # 创建 FusionMatrixOp
+        fusion_op = FusionMatrixOp(
+            merge_tree=merge_tree,
+            shared_inputs=list(shared_inputs),
+        )
 
         # 创建融合节点
-        fusion_node_name = self._create_fusion_node(graph, fusion, shared_inputs)
+        fusion_node_name = f"fused_matrix_{id(fusion_op)}"
+        graph.create_node(name=fusion_node_name, op=fusion_op)
 
-        # 改写计算图，重定向所有使用原始节点的地方到融合节点的相应输出
-        self._rewrite_graph(graph, nodes, fusion_node_name, fusion)
+        # 改写计算图
+        self._rewrite_graph(graph, nodes, fusion_node_name, fusion_op)
 
         return True
 
-    def _create_fusion_node(
-        self, graph: NxComputationGraph, fusion: FusionMatrix, shared_inputs: tuple[str, ...]
-    ) -> str:
-        """创建融合节点
+    def _build_merge_tree(
+        self,
+        graph: NxComputationGraph,
+        nodes: list[str],
+        latest_start_times: dict[str, float],
+    ) -> MergeTreeNode | None:
+        """构建合并树
+
+        根据最晚开工时间（LST）决定融合策略：
+        - 如果所有节点的 LST 相同：使用 INTERLEAVED 策略
+        - 如果节点的 LST 不同：按 LST 分组，递归构建树
 
         Args:
             graph: 计算图
-            fusion: 融合矩阵对象
-            shared_inputs: 共享输入
+            nodes: 要融合的节点列表
+            latest_start_times: 最晚开工时间字典
 
         Returns:
-            新创建的融合节点名称
+            合并树根节点，如果无法构建则返回 None
         """
-        # 创建融合节点
-        from pimapper.core.graph.ops.base import OpMetadata
-        fusion_node_name = f"fused_matrix_{len(fusion)}"
-        graph.create_node(
-            name=fusion_node_name,
-            op=fusion,
+        if not nodes:
+            return None
+
+        # 如果只有一个节点，创建叶节点
+        if len(nodes) == 1:
+            node_name = nodes[0]
+            op = graph.node_record(node_name)
+            lst = latest_start_times.get(node_name, 0.0)
+
+            # 获取形状
+            shape = None
+            if hasattr(op, 'results') and op.results:
+                first_result = op.results[0]
+                shape = getattr(first_result, 'shape', None)
+
+            # 确保 shape 不为 None
+            if shape is None:
+                return None
+
+            return MergeTreeNode.create_leaf(
+                op_name=node_name,
+                op=op,
+                shape=shape,
+                latest_start_time=lst,
+            )
+
+        # 按 LST 分组
+        lst_groups: dict[float, list[str]] = {}
+        for node_name in nodes:
+            lst = latest_start_times.get(node_name, 0.0)
+            if lst not in lst_groups:
+                lst_groups[lst] = []
+            lst_groups[lst].append(node_name)
+
+        # 如果所有节点的 LST 相同，使用 INTERLEAVED 策略
+        if len(lst_groups) == 1:
+            children = []
+            for node_name in nodes:
+                child = self._build_merge_tree(graph, [node_name], latest_start_times)
+                if child:
+                    children.append(child)
+
+            if not children:
+                return None
+
+            return MergeTreeNode.create_internal(
+                children=children,
+                strategy=FusionStrategy.INTERLEAVED,
+                block_size=self.block_size,
+            )
+
+        # 如果节点的 LST 不同，使用 SEQUENTIAL 策略
+        # 按 LST 升序排序（最早开始的在前面）
+        sorted_lsts = sorted(lst_groups.keys())
+
+        children = []
+        for lst in sorted_lsts:
+            group_nodes = lst_groups[lst]
+            child = self._build_merge_tree(graph, group_nodes, latest_start_times)
+            if child:
+                children.append(child)
+
+        if not children:
+            return None
+
+        return MergeTreeNode.create_internal(
+            children=children,
+            strategy=FusionStrategy.SEQUENTIAL,
+            block_size=self.block_size,
         )
 
-        return fusion_node_name
-
     def _rewrite_graph(
-        self, graph: NxComputationGraph, original_nodes: list[str], fusion_node: str, fusion: FusionMatrix
+        self,
+        graph: NxComputationGraph,
+        original_nodes: list[str],
+        fusion_node: str,
+        fusion_op: FusionMatrixOp,
     ) -> None:
         """改写计算图，用融合节点替换原始节点
 
         策略：
-        1. 直接用融合节点替换所有原始节点
-        2. 将所有原始节点的输入连接到融合节点
-        3. 将所有原始节点的输出连接到融合节点
-        4. 删除原始节点
+        1. 对于每个原始节点的后继节点，更新其输入引用
+        2. 使用 ResultFilter 从融合节点的输出中提取对应的部分
+        3. 删除原始节点
 
         Args:
             graph: 计算图
             original_nodes: 原始节点列表
             fusion_node: 融合节点名称
-            fusion: 融合矩阵对象
+            fusion_op: 融合操作对象
         """
-        # 收集所有原始节点的输入和输出连接关系
-        all_inputs = set()
-        all_successors = set()
-
+        # 收集所有原始节点的后继节点及其使用关系
+        node_successors: dict[str, list[str]] = {}
         for original_name in original_nodes:
-            # 收集原始节点的所有输入
-            predecessors = list(graph.predecessors(original_name))
-            all_inputs.update(predecessors)
-
-            # 收集原始节点的所有输出（后继节点）
             successors = list(graph.successors(original_name))
-            all_successors.update(successors)
+            node_successors[original_name] = successors
 
-        # 为融合节点创建所有必要的输入连接
-        for input_node in all_inputs:
-            graph.graph.add_edge(input_node, fusion_node)
-
-        # 将原始节点的所有输出连接重定向到融合节点
-        for successor in all_successors:
-            graph.graph.add_edge(fusion_node, successor)
-
-        # 在后继节点的参数中，将所有原始节点引用替换为融合节点
+        # 对于每个原始节点，更新其后继节点的输入
         for original_name in original_nodes:
-            # 将所有使用 original_name 的地方替换为 fusion_node
-            graph.replace_uses(original_name, fusion_node)
+            successors = node_successors[original_name]
+
+            # 获取该原始节点对应的 ResultFilter
+            result_filter = fusion_op.get_result_filter(original_name)
+
+            if result_filter is None:
+                # 如果找不到对应的 ResultFilter，跳过
+                continue
+
+            # 更新所有后继节点
+            for succ_name in successors:
+                succ_op = graph.node_record(succ_name)
+
+                # 更新 input_ops
+                if hasattr(succ_op, 'input_ops'):
+                    # 查找并替换 input_ops 中的引用
+                    new_input_ops = OrderedDict()
+                    for input_op, input_filter in succ_op.input_ops.items():
+                        # 检查 input_op 是否是原始节点
+                        input_op_name = None
+                        for orig_name in original_nodes:
+                            orig_op = graph.node_record(orig_name)
+                            if input_op is orig_op:
+                                input_op_name = orig_name
+                                break
+
+                        if input_op_name == original_name:
+                            # 替换为融合节点，并组合 ResultFilter
+                            combined_filter = self._combine_filters(result_filter, input_filter)
+                            new_input_ops[fusion_op] = combined_filter
+                        else:
+                            new_input_ops[input_op] = input_filter
+
+                    succ_op.input_ops = new_input_ops
+
+                # 更新 args 和 kwargs 中的引用
+                succ_op.args = self._replace_in_args(succ_op.args, original_name, fusion_node)
+                succ_op.kwargs = self._replace_in_args(succ_op.kwargs, original_name, fusion_node)
+
+                # 更新边连接
+                if graph.graph.has_edge(original_name, succ_name):
+                    graph.graph.remove_edge(original_name, succ_name)
+                if not graph.graph.has_edge(fusion_node, succ_name):
+                    graph.graph.add_edge(fusion_node, succ_name)
 
         # 删除原始节点
         for original_name in original_nodes:
             graph.remove_node(original_name, safe=False)
+
+    def _combine_filters(self, filter1: ResultFilter, filter2: ResultFilter) -> ResultFilter:
+        """组合两个 ResultFilter
+
+        将 filter2 的变换应用到 filter1 的结果上。
+
+        Args:
+            filter1: 第一个过滤器（从融合节点提取）
+            filter2: 第二个过滤器（原始的输入过滤器）
+
+        Returns:
+            组合后的过滤器
+        """
+        # 创建新的 ResultFilter，使用 filter1 的 index
+        combined = ResultFilter(index=filter1.index)
+
+        # 添加 filter1 的所有变换
+        for transform in filter1.transforms:
+            combined.add_transform(transform)
+
+        # 添加 filter2 的所有变换
+        for transform in filter2.transforms:
+            combined.add_transform(transform)
+
+        return combined
+
+    def _replace_in_args(self, arg: Any, old: str, new: str) -> Any:
+        """递归替换参数中的节点引用
+
+        Args:
+            arg: 要处理的参数
+            old: 要替换的旧节点名称
+            new: 新的节点名称
+
+        Returns:
+            替换后的参数结构
+        """
+        if isinstance(arg, tuple):
+            return tuple(self._replace_in_args(a, old, new) for a in arg)
+        if isinstance(arg, list):
+            return [self._replace_in_args(a, old, new) for a in arg]
+        if isinstance(arg, dict):
+            return {k: self._replace_in_args(v, old, new) for k, v in arg.items()}
+        if arg == old:
+            return new
+        return arg

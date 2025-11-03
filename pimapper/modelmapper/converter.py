@@ -224,20 +224,6 @@ def build_computation_graph(
 
 
 
-def summarize_graph(graph: NxComputationGraph) -> list[str]:
-    lines: list[str] = []
-    for name in graph.nodes():
-        op = graph.node_record(name)
-        shape = op.results[0].shape if op.results else None
-        dtype = op.results[0].dtype if op.results else None
-
-        successors = list(graph.successors(name))
-        if successors:
-            succ_str = ", ".join(successors)
-            lines.append(f"{name}: {op.op_type} -> {shape} {dtype} -> [{succ_str}]")
-        else:
-            lines.append(f"{name}: {op.op_type} -> {shape} {dtype}")
-    return lines
 
 
 
