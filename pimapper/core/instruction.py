@@ -1,11 +1,19 @@
 
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 
-@dataclass
+@dataclass(eq=False)
 class CommandBase:
     command_id: int = field(init=False)
+
+    # DAG structure
+    input_commands: dict['CommandBase', None] = field(default_factory=dict)
+    output_commands: dict['CommandBase', None] = field(default_factory=dict)
+
+    prev_commands: dict['CommandBase', None] = field(default_factory=dict)
+    next_commands: dict['CommandBase', None] = field(default_factory=dict)
 
     # Class variable to track the next ID
     _next_id: int = field(default=0, init=False, repr=False, compare=False)
@@ -13,9 +21,15 @@ class CommandBase:
     def __post_init__(self):
         # Assign the current ID and increment the class-level counter
         self.command_id = CommandBase._next_id
-        CommandBase._next_id += 1 
+        CommandBase._next_id += 1
 
-@dataclass
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return self is other 
+
+@dataclass(eq=False)
 class HostWriteBufferCommand(CommandBase):
     op_name:str =  "host_write_buffer"
 
@@ -31,7 +45,7 @@ class HostWriteBufferCommand(CommandBase):
     
 
 
-@dataclass
+@dataclass(eq=False)
 class HostReadBufferCommand(CommandBase):
     op_name: str = "host_read_buffer" 
     
@@ -44,7 +58,7 @@ class HostReadBufferCommand(CommandBase):
     dst_host_buffer_addr: int = 0 # 
 
 
-@dataclass
+@dataclass(eq=False)
 class PIMComputeCommand(CommandBase):
     op_name:str = "pim_compute"
 
@@ -61,7 +75,7 @@ class PIMComputeCommand(CommandBase):
 
 
 
-@dataclass
+@dataclass(eq=False)
 class HostVectorCommand(CommandBase):
     # 最复杂的部分 
 

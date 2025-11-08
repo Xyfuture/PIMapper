@@ -1,0 +1,12 @@
+# Core dependencies
+torch>=2.0.0
+networkx>=3.0
+numpy>=1.20.0
+
+# Submodule dependencies
+greenlet
+sortedcontainers
+
+# Local packages (install with pip install -e)
+# -e ./packages/Desim
+# -e ./packages/PerfTracer

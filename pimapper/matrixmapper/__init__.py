@@ -2,10 +2,10 @@
 
 from .strategy.trivial import TrivialTilingStrategy
 from .strategy.h2llm_mapping import H2LLMTilingStrategy
-from .strategy.agent_grid_search import AgentGridSearchStrategy
+from .strategy.recursive_grid_search import RecursiveGridSearchStrategy
 
 __all__ = [
     "TrivialTilingStrategy",
     "H2LLMTilingStrategy",
-    "AgentGridSearchStrategy",
+    "RecursiveGridSearchStrategy",
 ]

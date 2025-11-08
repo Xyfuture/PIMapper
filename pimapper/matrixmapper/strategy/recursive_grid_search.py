@@ -9,11 +9,11 @@ from ...core.matrixspec import Mapping, MatrixShape
 from ..evaluator import evaluate
 from ...core.utils import MappingResult
 
-logger = logging.getLogger("agent_grid_search")
+logger = logging.getLogger("recursive_grid_search")
 
 
 @dataclass
-class AgentGridSearchStrategy:
+class RecursiveGridSearchStrategy:
     """Advanced recursive DSE strategy to find optimal Mapping via grid splits.
 
     This strategy combines the best features from both GPT and Codex implementations:

@@ -1,0 +1,6 @@
+[submodule "packages/Desim"]
+	path = packages/Desim
+	url = https://github.com/Xyfuture/Desim.git
+[submodule "packages/PerfTracer"]
+	path = packages/PerfTracer
+	url = https://github.com/Xyfuture/PerfTracer.git
