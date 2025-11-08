@@ -7,8 +7,8 @@ from typing import Callable, Dict, Optional
 
 
 @dataclass(frozen=True)
-class ComputeDieSpec:
-    """Immutable specification for a compute die.
+class PIMChannelSpec:
+    """Immutable specification for a PIM channel.
 
     Args:
         compute_power: Compute power in TFLOPS
@@ -78,32 +78,34 @@ class ComputeDieSpec:
 
     def __str__(self) -> str:
         if self.shared_bandwidth is not None:
-            return (f"ComputeDieSpec(compute={self.compute_power}TFLOPS, "
+            return (f"PIMChannelSpec(compute={self.compute_power}TFLOPS, "
                     f"shared_bandwidth={self.shared_bandwidth}GB/s, "
                     f"memory={self.memory_bandwidth}TB/s)")
         else:
-            return (f"ComputeDieSpec(compute={self.compute_power}TFLOPS, "
+            return (f"PIMChannelSpec(compute={self.compute_power}TFLOPS, "
                     f"input={self.input_bandwidth}GB/s, output={self.output_bandwidth}GB/s, "
                     f"memory={self.memory_bandwidth}TB/s)")
 
 
 @dataclass(frozen=True)
-class ChipSpec:
-    """Immutable blueprint for a chip composed of homogeneous dies."""
+class AcceleratorSpec:
+    """Immutable blueprint for an accelerator composed of homogeneous PIM channels."""
 
-    die_count: int
-    die_spec: ComputeDieSpec
+    channel_count: int
+    channel_spec: PIMChannelSpec
 
     def __post_init__(self) -> None:
-        if self.die_count <= 0:
-            raise ValueError("die_count must be positive")
+        if self.channel_count <= 0:
+            raise ValueError("channel_count must be positive")
 
     def __str__(self) -> str:
-        return f"ChipSpec({self.die_count} dies, {self.die_spec})"
+        return f"AcceleratorSpec({self.channel_count} channels, {self.channel_spec})"
 
-# Backwards compatibility aliases (prefer the *Spec* names going forward).
-ComputeDieConfig = ComputeDieSpec
-ChipConfig = ChipSpec
+# Backwards compatibility aliases
+ComputeDieSpec = PIMChannelSpec
+ComputeDieConfig = PIMChannelSpec
+ChipSpec = AcceleratorSpec
+ChipConfig = AcceleratorSpec
 
 
 # ---------------------------------------------------------------------------
@@ -112,14 +114,26 @@ ChipConfig = ChipSpec
 
 
 @dataclass
-class ComputeDie:
-    """Runtime representation of a compute die."""
+class Host:
+    """Runtime representation of a host processor that connects to PIM channels."""
 
-    die_id: str
-    spec: ComputeDieSpec
+    host_id: str
     meta: Dict[str, str] = field(default_factory=dict)
 
-  
+    def __str__(self) -> str:
+        meta_str = f", meta={self.meta}" if self.meta else ""
+        return f"Host({self.host_id}{meta_str})"
+
+
+@dataclass
+class PIMChannel:
+    """Runtime representation of a PIM channel."""
+
+    channel_id: str
+    spec: PIMChannelSpec
+    meta: Dict[str, str] = field(default_factory=dict)
+
+
     @property
     def compute_power(self) -> float:
         return self.spec.compute_power
@@ -138,45 +152,52 @@ class ComputeDie:
 
     def __str__(self) -> str:
         meta_str = f", meta={self.meta}" if self.meta else ""
-        return f"ComputeDie({self.die_id}, {self.spec}{meta_str})"
+        return f"PIMChannel({self.channel_id}, {self.spec}{meta_str})"
+
+# Backwards compatibility alias
+ComputeDie = PIMChannel
 
 
 @dataclass
-class Chip:
-    """Runtime chip composed of instantiated compute dies."""
+class Accelerator:
+    """Runtime accelerator composed of a host and PIM channels."""
 
-    spec: ChipSpec
-    compute_dies: Dict[str, ComputeDie] = field(default_factory=dict)
+    spec: AcceleratorSpec
+    host: Optional[Host] = None
+    channels: Dict[str, PIMChannel] = field(default_factory=dict)
 
     @classmethod
     def create_from_spec(
         cls,
-        spec: ChipSpec,
+        spec: AcceleratorSpec,
         *,
-        id_prefix: str = "die",
+        id_prefix: str = "channel",
+        host_id: str = "host_0",
         meta_factory: Optional[Callable[[int], Dict[str, str]]] = None,
-    ) -> "Chip":
-        """Create a Chip instance populated with compute dies from the spec."""
+    ) -> "Accelerator":
+        """Create an Accelerator instance populated with PIM channels from the spec."""
 
-        compute_dies: Dict[str, ComputeDie] = {}
-        for idx in range(spec.die_count):
-            die_id = f"{id_prefix}_{idx}"
+        channels: Dict[str, PIMChannel] = {}
+        for idx in range(spec.channel_count):
+            channel_id = f"{id_prefix}_{idx}"
             meta = meta_factory(idx) if meta_factory else {}
-            compute_dies[die_id] = ComputeDie(die_id=die_id, spec=spec.die_spec, meta=meta)
-        return cls(spec=spec, compute_dies=compute_dies)
+            channels[channel_id] = PIMChannel(channel_id=channel_id, spec=spec.channel_spec, meta=meta)
 
-    def add_die(self, die: ComputeDie) -> None:
-        self.compute_dies[die.die_id] = die
+        host = Host(host_id=host_id)
+        return cls(spec=spec, host=host, channels=channels)
 
-    def remove_die(self, die_id: str) -> None:
-        self.compute_dies.pop(die_id, None)
+    def add_channel(self, channel: PIMChannel) -> None:
+        self.channels[channel.channel_id] = channel
 
-    def get_die(self, die_id: str) -> Optional[ComputeDie]:
-        return self.compute_dies.get(die_id)
+    def remove_channel(self, channel_id: str) -> None:
+        self.channels.pop(channel_id, None)
+
+    def get_channel(self, channel_id: str) -> Optional[PIMChannel]:
+        return self.channels.get(channel_id)
 
     @property
     def total_compute_power(self) -> float:
-        return sum(die.compute_power for die in self.compute_dies.values())
+        return sum(channel.compute_power for channel in self.channels.values())
 
     @property
     def total_compute_power_gops(self) -> float:
@@ -184,11 +205,11 @@ class Chip:
 
     @property
     def total_input_bandwidth(self) -> float:
-        return sum(die.input_bandwidth for die in self.compute_dies.values())
+        return sum(channel.input_bandwidth for channel in self.channels.values())
 
     @property
     def total_output_bandwidth(self) -> float:
-        return sum(die.output_bandwidth for die in self.compute_dies.values())
+        return sum(channel.output_bandwidth for channel in self.channels.values())
 
     @property
     def total_bandwidth(self) -> float:
@@ -196,9 +217,30 @@ class Chip:
 
     @property
     def total_memory_bandwidth(self) -> float:
-        return sum(die.memory_bandwidth for die in self.compute_dies.values())
+        return sum(channel.memory_bandwidth for channel in self.channels.values())
 
     def __str__(self) -> str:
-        die_count = len(self.compute_dies)
+        channel_count = len(self.channels)
         total_compute = self.total_compute_power
-        return f"Chip({die_count} dies, {total_compute}TFLOPS total compute)"
+        return f"Accelerator({channel_count} channels, {total_compute}TFLOPS total compute)"
+
+    # Backwards compatibility properties
+    @property
+    def compute_dies(self) -> Dict[str, PIMChannel]:
+        """Backwards compatibility: alias for channels."""
+        return self.channels
+
+    def add_die(self, die: PIMChannel) -> None:
+        """Backwards compatibility: alias for add_channel."""
+        self.add_channel(die)
+
+    def remove_die(self, die_id: str) -> None:
+        """Backwards compatibility: alias for remove_channel."""
+        self.remove_channel(die_id)
+
+    def get_die(self, die_id: str) -> Optional[PIMChannel]:
+        """Backwards compatibility: alias for get_channel."""
+        return self.get_channel(die_id)
+
+# Backwards compatibility alias
+Chip = Accelerator

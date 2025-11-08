@@ -33,9 +33,9 @@ from dataclasses import dataclass, field
 from math import sqrt
 from typing import List, Optional, Tuple
 
-from ...core.hwspec import Chip
+from ...core.hwspec import Accelerator
 from ...core.matrixspec import Mapping, MatrixShape
-from ...sim.sim_engine import simulate
+from ..evaluator import evaluate
 from ...core.utils import MappingResult
 
 logger = logging.getLogger("h2llm_mapping")
@@ -71,13 +71,13 @@ class H2LLMTilingStrategy:
     def create_mapping(
         self,
         matrix_shape: MatrixShape,
-        chip: Chip,
+        accelerator: Accelerator,
     ) -> Mapping:
         """Create a mapping using H2-LLM's analytical tiling strategy.
 
         Args:
             matrix_shape: Matrix dimensions (M × N with batch_size)
-            chip: Hardware chip configuration
+            accelerator: Hardware accelerator configuration
 
         Returns:
             Mapping object with optimized tile assignments
@@ -85,26 +85,26 @@ class H2LLMTilingStrategy:
         Raises:
             ValueError: If parameters are invalid
         """
-        if not chip.compute_dies:
-            raise ValueError("Chip must have at least one compute die")
+        if not accelerator.channels:
+            raise ValueError("Accelerator must have at least one PIM channel")
         if matrix_shape.rows <= 0 or matrix_shape.cols <= 0:
             raise ValueError("Matrix dimensions must be positive")
         if matrix_shape.batch_size <= 0:
             raise ValueError("Batch size must be positive")
 
-        # Extract bandwidth parameters from the chip's die spec
-        # (assuming all dies have the same configuration)
-        die_spec = chip.spec.die_spec
-        load_bandwidth = die_spec.get_input_bandwidth()  # GB/s
-        store_bandwidth = die_spec.get_output_bandwidth()    # GB/s
+        # Extract bandwidth parameters from the accelerator's channel spec
+        # (assuming all channels have the same configuration)
+        channel_spec = accelerator.spec.channel_spec
+        load_bandwidth = channel_spec.get_input_bandwidth()  # GB/s
+        store_bandwidth = channel_spec.get_output_bandwidth()    # GB/s
 
-        M = 0 
+        M = 0
         K = matrix_shape.rows
         N = matrix_shape.cols
         batch_size = matrix_shape.batch_size
-        C = len(chip.compute_dies)
+        C = len(accelerator.channels)
 
-        logger.debug(f"H2-LLM Mapping: Matrix {M}×{N}×{batch_size}, {C} compute dies")
+        logger.debug(f"H2-LLM Mapping: Matrix {M}×{N}×{batch_size}, {C} PIM channels")
         logger.debug(f"  Load BW: {load_bandwidth} GB/s, Store BW: {store_bandwidth} GB/s")
 
         # For GEMM: Input (M, K) × Weight (K, N) = Output (M, N)
@@ -121,7 +121,7 @@ class H2LLMTilingStrategy:
         logger.debug(f"  This creates {T_K * T_N} tiles across {C} channels")
 
         # Create the mapping with calculated tiling
-        mapping = self._create_tiled_mapping(matrix_shape, chip, T_K, T_N)
+        mapping = self._create_tiled_mapping(matrix_shape, accelerator, T_K, T_N)
 
         # Validate the mapping
         try:
@@ -136,22 +136,22 @@ class H2LLMTilingStrategy:
     def find_optimal_mapping(
         self,
         matrix_shape: MatrixShape,
-        chip: Chip,
+        accelerator: Accelerator,
     ) -> Optional[MappingResult]:
         """Find the optimal mapping and evaluate its performance.
 
-        This method creates the mapping and simulates it to get the latency.
+        This method creates the mapping and evaluates it to get the latency.
 
         Args:
             matrix_shape: Matrix dimensions
-            chip: Hardware chip configuration
+            accelerator: Hardware accelerator configuration
 
         Returns:
             MappingResult with mapping and latency, or None if mapping fails
         """
         try:
-            mapping = self.create_mapping(matrix_shape, chip)
-            latency = simulate(chip, mapping)
+            mapping = self.create_mapping(matrix_shape, accelerator)
+            latency = evaluate(accelerator, mapping)
 
             result = MappingResult(mapping=mapping, latency=latency)
             utilization = result.get_compute_utilization()
@@ -308,7 +308,7 @@ class H2LLMTilingStrategy:
     def _create_tiled_mapping(
         self,
         matrix_shape: MatrixShape,
-        chip: Chip,
+        accelerator: Accelerator,
         T_K: int,
         T_N: int,
     ) -> Mapping:
@@ -317,12 +317,12 @@ class H2LLMTilingStrategy:
         The tiling strategy:
         - Split rows into T_K parts (for K dimension)
         - Split cols into T_N parts (for N dimension)
-        - Split batch dimension evenly across compute dies if needed
-        - Distribute tiles to dies in round-robin fashion
+        - Split batch dimension evenly across PIM channels if needed
+        - Distribute tiles to channels in round-robin fashion
 
         Args:
             matrix_shape: Matrix dimensions
-            chip: Chip configuration
+            accelerator: Accelerator configuration
             T_K: Tiling factor for row dimension
             T_N: Tiling factor for column dimension
 
@@ -335,29 +335,29 @@ class H2LLMTilingStrategy:
 
         # For batch dimension, try to split if we have extra capacity
         num_spatial_tiles = len(row_bounds) * len(col_bounds)
-        num_dies = len(chip.compute_dies)
+        num_channels = len(accelerator.channels)
 
-        # Split batch if we have more dies than spatial tiles
-        batch_splits = max(1, min(matrix_shape.batch_size, num_dies // num_spatial_tiles))
+        # Split batch if we have more channels than spatial tiles
+        batch_splits = max(1, min(matrix_shape.batch_size, num_channels // num_spatial_tiles))
         batch_bounds = self._split_dimension(matrix_shape.batch_size, batch_splits)
 
         logger.debug(f"    Row splits: {len(row_bounds)}, Col splits: {len(col_bounds)}, Batch splits: {len(batch_bounds)}")
 
         # Create mapping
-        mapping = Mapping(matrix=matrix_shape, chip=chip)
-        die_ids = sorted(chip.compute_dies.keys())
+        mapping = Mapping(matrix=matrix_shape, accelerator=accelerator)
+        channel_ids = sorted(accelerator.channels.keys())
 
         # Distribute tiles in row-major order with round-robin assignment
         tile_idx = 0
         for r0, r1 in row_bounds:
             for c0, c1 in col_bounds:
                 for b0, b1 in batch_bounds:
-                    die_id = die_ids[tile_idx % num_dies]
+                    channel_id = channel_ids[tile_idx % num_channels]
                     # add_tile expects dimensions (num_rows, num_cols, num_batches), not boundaries
-                    mapping.add_tile(die_id, r1 - r0, c1 - c0, b1 - b0)
+                    mapping.add_tile(channel_id, r1 - r0, c1 - c0, b1 - b0)
                     tile_idx += 1
 
-        logger.debug(f"    Created {tile_idx} tiles distributed across {num_dies} dies")
+        logger.debug(f"    Created {tile_idx} tiles distributed across {num_channels} channels")
 
         return mapping
 

@@ -5,13 +5,13 @@ from __future__ import annotations
 The module is organised around three layers:
 
 1. Matrix primitives (`MatrixShape`, `Tile`) describe how data is partitioned.
-2. Hardware specifications (`ComputeDieSpec`, `ChipSpec`) capture immutable
+2. Hardware specifications (`PIMChannelSpec`, `AcceleratorSpec`) capture immutable
    configuration that can be instantiated into runtime objects.
-3. Runtime entities (`ComputeDie`, `Chip`, `Mapping`) encapsulate mutable state
-   such as live die metadata or tile ownership.
+3. Runtime entities (`PIMChannel`, `Accelerator`, `Mapping`) encapsulate mutable state
+   such as live channel metadata or tile ownership.
 
 Keeping the configuration separate from instances makes it easier to reason
-about how a chip should look (spec) versus how it currently behaves (runtime
+about how an accelerator should look (spec) versus how it currently behaves (runtime
 objects). Builders provided on the runtime classes help translate specs into
 instantiated objects with minimal boilerplate.
 """
@@ -21,7 +21,7 @@ from typing import Callable, ClassVar, Dict, Iterable, List, Optional, Tuple, TY
 from enum import Enum
 
 if TYPE_CHECKING:
-    from .hwspec import Chip, ComputeDie
+    from .hwspec import Accelerator, PIMChannel
 
 
 # ---------------------------------------------------------------------------
@@ -177,38 +177,44 @@ class Tile:
 # Mapping and validation
 # ---------------------------------------------------------------------------
 
-TileAssignmentInput = Tuple[str, int, int, int]  # (die_id, num_rows, num_cols, num_batches)
+TileAssignmentInput = Tuple[str, int, int, int]  # (channel_id, num_rows, num_cols, num_batches)
 
 
 @dataclass
 class Mapping:
-    """Bidirectional mapping between tiles and compute dies."""
+    """Bidirectional mapping between tiles and PIM channels."""
 
     matrix: MatrixShape
-    chip: "Chip"
+    accelerator: "Accelerator"
     tiles: Dict[str, Tile] = field(default_factory=dict)
     placement: Dict[str, List[Tile]] = field(default_factory=dict)
-    reverse_placement: Dict[str, "ComputeDie"] = field(default_factory=dict)
+    reverse_placement: Dict[str, "PIMChannel"] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for die_id in self.chip.compute_dies:
-            self.placement.setdefault(die_id, [])
+        for channel_id in self.accelerator.channels:
+            self.placement.setdefault(channel_id, [])
+
+    # Backwards compatibility property
+    @property
+    def chip(self) -> "Accelerator":
+        """Backwards compatibility: alias for accelerator."""
+        return self.accelerator
 
     @classmethod
     def from_tile_data(
         cls,
         matrix: MatrixShape,
-        chip: "Chip",
+        accelerator: "Accelerator",
         tile_data: Iterable[TileAssignmentInput],
     ) -> "Mapping":
-        mapping = cls(matrix=matrix, chip=chip)
+        mapping = cls(matrix=matrix, accelerator=accelerator)
         mapping.build(tile_data)
         mapping.check_all()
         return mapping
 
     def add_tile(
         self,
-        die_id: str,
+        channel_id: str,
         num_rows: int,
         num_cols: int,
         num_batches: int = 1,
@@ -231,20 +237,20 @@ class Mapping:
                 data_format=self.matrix.data_format
             )
         )
-        self._register_tile(die_id, tile)
+        self._register_tile(channel_id, tile)
         return tile
 
     def build(self, tile_data: Iterable[TileAssignmentInput]) -> None:
-        for die_id, num_rows, num_cols, num_batches in tile_data:
-            self.add_tile(die_id, num_rows, num_cols, num_batches)
+        for channel_id, num_rows, num_cols, num_batches in tile_data:
+            self.add_tile(channel_id, num_rows, num_cols, num_batches)
 
-    def _register_tile(self, die_id: str, tile: Tile) -> None:
-        if die_id not in self.chip.compute_dies:
-            raise ValueError(f"Unknown compute die: {die_id}")
+    def _register_tile(self, channel_id: str, tile: Tile) -> None:
+        if channel_id not in self.accelerator.channels:
+            raise ValueError(f"Unknown PIM channel: {channel_id}")
 
         self.tiles[tile.tile_id] = tile
-        self.placement.setdefault(die_id, []).append(tile)
-        self.reverse_placement[tile.tile_id] = self.chip.compute_dies[die_id]
+        self.placement.setdefault(channel_id, []).append(tile)
+        self.reverse_placement[tile.tile_id] = self.accelerator.channels[channel_id]
 
     # ----------
     # Validation helpers
@@ -257,14 +263,14 @@ class Mapping:
 
     def _check_tiles_exist_in_placement(self) -> None:
         seen = set()
-        for die, tiles in self.placement.items():
+        for channel, tiles in self.placement.items():
             for tile in tiles:
                 if tile.tile_id not in self.tiles:
                     raise ValueError(
-                        f"Placement referenced non-existent tile: {tile.tile_id} @ die={die}"
+                        f"Placement referenced non-existent tile: {tile.tile_id} @ channel={channel}"
                     )
                 if tile.tile_id in seen:
-                    raise ValueError(f"Tile appears on multiple dies: {tile.tile_id}")
+                    raise ValueError(f"Tile appears on multiple channels: {tile.tile_id}")
                 seen.add(tile.tile_id)
         if seen != set(self.tiles.keys()):
             missing = set(self.tiles.keys()) - seen
@@ -282,56 +288,69 @@ class Mapping:
     # Convenience statistics
     # ----------
 
+    def channel_loads(self) -> Dict[str, int]:
+        return {channel: len(tiles) for channel, tiles in self.placement.items()}
+
+    def channel_areas(self) -> Dict[str, int]:
+        return {
+            channel: sum(tile.area for tile in tiles)
+            for channel, tiles in self.placement.items()
+        }
+
+    def channel_volumes(self) -> Dict[str, int]:
+        return {
+            channel: sum(tile.volume for tile in tiles)
+            for channel, tiles in self.placement.items()
+        }
+
+    def tiles_of_channel(self, channel_id: str) -> List[Tile]:
+        return list(self.placement.get(channel_id, []))
+
+    # Backwards compatibility methods
     def die_loads(self) -> Dict[str, int]:
-        return {die: len(tiles) for die, tiles in self.placement.items()}
+        return self.channel_loads()
 
     def die_areas(self) -> Dict[str, int]:
-        return {
-            die: sum(tile.area for tile in tiles)
-            for die, tiles in self.placement.items()
-        }
+        return self.channel_areas()
 
     def die_volumes(self) -> Dict[str, int]:
-        return {
-            die: sum(tile.volume for tile in tiles)
-            for die, tiles in self.placement.items()
-        }
+        return self.channel_volumes()
 
     def tiles_of_die(self, die_id: str) -> List[Tile]:
-        return list(self.placement.get(die_id, []))
+        return self.tiles_of_channel(die_id)
 
     def display(self) -> None:
-        """Display mapping summary with matrix size and tile assignments per die."""
+        """Display mapping summary with matrix size and tile assignments per channel."""
         print(f"Matrix: {self.matrix.rows}×{self.matrix.cols}×{self.matrix.batch_size}")
-        for die_id in sorted(self.placement.keys()):
-            tiles = self.placement[die_id]
+        for channel_id in sorted(self.placement.keys()):
+            tiles = self.placement[channel_id]
             if tiles:
                 tile_info = []
                 for tile in tiles:
                     tile_info.append(f"{tile.num_rows}×{tile.num_cols}×{tile.num_batches}")
-                print(f"  {die_id}: {', '.join(tile_info)}")
+                print(f"  {channel_id}: {', '.join(tile_info)}")
             else:
-                print(f"  {die_id}: (empty)")
+                print(f"  {channel_id}: (empty)")
 
     # ----------
     # Bidirectional mapping checks
     # ----------
 
     def check_bidirectional_mapping(self) -> bool:
-        for die_id, tiles in self.placement.items():
+        for channel_id, tiles in self.placement.items():
             for tile in tiles:
-                compute_die = self.reverse_placement.get(tile.tile_id)
-                if compute_die is None or compute_die.die_id != die_id:
+                pim_channel = self.reverse_placement.get(tile.tile_id)
+                if pim_channel is None or pim_channel.channel_id != channel_id:
                     return False
 
-        for tile_id, compute_die in self.reverse_placement.items():
+        for tile_id, pim_channel in self.reverse_placement.items():
             if tile_id not in self.tiles:
                 return False
-            assigned_tiles = self.placement.get(compute_die.die_id, [])
+            assigned_tiles = self.placement.get(pim_channel.channel_id, [])
             if not any(tile.tile_id == tile_id for tile in assigned_tiles):
                 return False
 
-        for die_id, tiles in self.placement.items():
+        for channel_id, tiles in self.placement.items():
             for tile in tiles:
                 if tile.tile_id not in self.reverse_placement:
                     return False
@@ -340,5 +359,5 @@ class Mapping:
 
     def __str__(self) -> str:
         tile_count = len(self.tiles)
-        die_count = len([die for die, tiles in self.placement.items() if tiles])
-        return f"Mapping({tile_count} tiles on {die_count} active dies, matrix={self.matrix})"
+        channel_count = len([channel for channel, tiles in self.placement.items() if tiles])
+        return f"Mapping({tile_count} tiles on {channel_count} active channels, matrix={self.matrix})"

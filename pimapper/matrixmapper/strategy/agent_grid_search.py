@@ -4,9 +4,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
-from ...core.hwspec import Chip
+from ...core.hwspec import Accelerator
 from ...core.matrixspec import Mapping, MatrixShape
-from ...sim.sim_engine import simulate
+from ..evaluator import evaluate
 from ...core.utils import MappingResult
 
 logger = logging.getLogger("agent_grid_search")
@@ -51,14 +51,14 @@ class AgentGridSearchStrategy:
         indent = "  " * iteration
         logger.debug(f"{indent}{message}")
 
-    def _validate_and_simulate(self, chip: Chip, mapping: Mapping) -> Optional[MappingResult]:
-        """Validate mapping and run simulation, return None on failure."""
+    def _validate_and_evaluate(self, accelerator: Accelerator, mapping: Mapping) -> Optional[MappingResult]:
+        """Validate mapping and run evaluation, return None on failure."""
         try:
             mapping.check_all()
-            latency = simulate(chip, mapping)
+            latency = evaluate(accelerator, mapping)
             return MappingResult(mapping=mapping, latency=latency)
         except Exception as e:
-            logger.error(f"Validation/simulation failed: {type(e).__name__}: {e}")
+            logger.error(f"Validation/evaluation failed: {type(e).__name__}: {e}")
             logger.debug(f"Failed mapping details: {mapping}")
             return None
 
@@ -73,33 +73,32 @@ class AgentGridSearchStrategy:
     def find_optimal_mapping(
         self,
         matrix_shape: MatrixShape,
-        chip: Chip,
-        available_dies: Optional[Set[str]] = None,
+        accelerator: Accelerator,
+        available_channels: Optional[Set[str]] = None,
         current_iteration: int = 0,
     ) -> Optional[MappingResult]:
-        """Find the optimal mapping for the given matrix and chip configuration.
+        """Find the optimal mapping for the given matrix and accelerator configuration.
 
         Args:
             matrix_shape: The matrix dimensions to optimize for
-            chip: Hardware chip configuration with compute dies
-            available_dies: Set of die IDs to use (defaults to all dies)
+            accelerator: Hardware accelerator configuration with PIM channels
+            available_channels: Set of channel IDs to use (defaults to all channels)
             current_iteration: Current recursion depth (internal parameter)
 
-        Returns:ai
-
+        Returns:
             MappingResult with optimal mapping and latency, or None if no valid mapping found
         """
-        if available_dies is None:
-            available_dies = set(chip.compute_dies.keys())
-        if not available_dies:
+        if available_channels is None:
+            available_channels = set(accelerator.channels.keys())
+        if not available_channels:
             return None
 
         # Log recursion progress
         self._log(current_iteration, f"[Iteration {current_iteration}] Processing matrix: {matrix_shape.rows}x{matrix_shape.cols}x{matrix_shape.batch_size}")
-        self._log(current_iteration, f"  Available dies: {sorted(list(available_dies))} (count: {len(available_dies)})")
+        self._log(current_iteration, f"  Available channels: {sorted(list(available_channels))} (count: {len(available_channels)})")
 
         # Check memoization cache
-        key = self._memo_key(matrix_shape, available_dies)
+        key = self._memo_key(matrix_shape, available_channels)
         if key in self.memo:
             self._log(current_iteration, "  Result retrieved from cache")
             return self.memo[key]
@@ -114,17 +113,17 @@ class AgentGridSearchStrategy:
                 if self._is_valid_split(num_r, num_c, matrix_shape):
                     split_candidates.append((num_r, num_c))
 
-        # # Add fallback splits: 1×n_dies and n_dies×1 for perfect die matching
+        # # Add fallback splits: 1×n_channels and n_channels×1 for perfect channel matching
         # if self.enable_fallback_splits:
-        #     n_dies = len(available_dies)
-        #     # 1×n_dies: one row, n_dies columns
-        #     if n_dies <= matrix_shape.cols and (1, n_dies) not in split_candidates:
-        #         self._log(current_iteration, f"  Adding fallback split: 1×{n_dies} (matches die count)")
-        #         split_candidates.append((1, n_dies))
-        #     # n_dies×1: n_dies rows, one column
-        #     if n_dies <= matrix_shape.rows and (n_dies, 1) not in split_candidates:
-        #         self._log(current_iteration, f"  Adding fallback split: {n_dies}×1 (matches die count)")
-        #         split_candidates.append((n_dies, 1))
+        #     n_channels = len(available_channels)
+        #     # 1×n_channels: one row, n_channels columns
+        #     if n_channels <= matrix_shape.cols and (1, n_channels) not in split_candidates:
+        #         self._log(current_iteration, f"  Adding fallback split: 1×{n_channels} (matches channel count)")
+        #         split_candidates.append((1, n_channels))
+        #     # n_channels×1: n_channels rows, one column
+        #     if n_channels <= matrix_shape.rows and (n_channels, 1) not in split_candidates:
+        #         self._log(current_iteration, f"  Adding fallback split: {n_channels}×1 (matches channel count)")
+        #         split_candidates.append((n_channels, 1))
 
         # Try all split configurations
         split_count = 0
@@ -138,7 +137,7 @@ class AgentGridSearchStrategy:
 
             # Pruning: Check utilization upper bound
             if best:
-                estimated_util = self._estimate_utilization(chip, matrix_shape, num_r, num_c)
+                estimated_util = self._estimate_utilization(accelerator, matrix_shape, num_r, num_c)
                 current_best_util = best.get_compute_utilization()
                 # print(f"  Estimated utilization: {estimated_util:.2%} Current best: {current_best_util:.2%}"   )
                 if estimated_util < current_best_util:
@@ -148,7 +147,7 @@ class AgentGridSearchStrategy:
 
             try:
                 candidate = self._evaluate_split_configuration(
-                    matrix_shape, chip, available_dies, num_r, num_c, current_iteration
+                    matrix_shape, accelerator, available_channels, num_r, num_c, current_iteration
                 )
             except Exception:
                 self._log(current_iteration, "    Configuration failed")
@@ -178,8 +177,8 @@ class AgentGridSearchStrategy:
     def _evaluate_split_configuration(
         self,
         matrix: MatrixShape,
-        chip: Chip,
-        available_dies: Set[str],
+        accelerator: Accelerator,
+        available_channels: Set[str],
         num_split_row: int,
         num_split_col: int,
         current_iteration: int,
@@ -202,42 +201,42 @@ class AgentGridSearchStrategy:
                         batch_size=b1 - b0
                     ))
 
-        die_ids = sorted(list(available_dies))
+        channel_ids = sorted(list(available_channels))
         n_tiles = len(tiles)
-        n_dies = len(die_ids)
+        n_channels = len(channel_ids)
 
-        self._log(current_iteration, f"    Generated {n_tiles} tiles, {n_dies} dies")
+        self._log(current_iteration, f"    Generated {n_tiles} tiles, {n_channels} channels")
 
-        if n_dies == 0:
+        if n_channels == 0:
             return None
 
-        # Progress guarantee: if we have enough dies, assign all tiles
-        if n_tiles <= n_dies:
-            self._log(current_iteration, f"    Tiles <= dies, direct assignment")
-            assignments: Dict[str, List[MatrixShape]] = {d: [] for d in die_ids}
+        # Progress guarantee: if we have enough channels, assign all tiles
+        if n_tiles <= n_channels:
+            self._log(current_iteration, f"    Tiles <= channels, direct assignment")
+            assignments: Dict[str, List[MatrixShape]] = {c: [] for c in channel_ids}
             for i, tile in enumerate(tiles):
-                assignments[die_ids[i % n_dies]].append(tile)
+                assignments[channel_ids[i % n_channels]].append(tile)
 
-            main_mapping = self._create_mapping_from_specs(matrix, chip, assignments)
-            return self._validate_and_simulate(chip, main_mapping)
+            main_mapping = self._create_mapping_from_specs(matrix, accelerator, assignments)
+            return self._validate_and_evaluate(accelerator, main_mapping)
 
         # Round-robin distribution: complete rounds only
-        tiles_per_die = n_tiles // n_dies
-        assigned_count = tiles_per_die * n_dies
+        tiles_per_channel = n_tiles // n_channels
+        assigned_count = tiles_per_channel * n_channels
 
-        self._log(current_iteration, f"    Round-robin: {tiles_per_die} tiles per die, total {assigned_count} assigned")
+        self._log(current_iteration, f"    Round-robin: {tiles_per_channel} tiles per channel, total {assigned_count} assigned")
 
-        main_assignments: Dict[str, List[MatrixShape]] = {d: [] for d in die_ids}
+        main_assignments: Dict[str, List[MatrixShape]] = {c: [] for c in channel_ids}
         for i in range(assigned_count):
-            main_assignments[die_ids[i % n_dies]].append(tiles[i])
+            main_assignments[channel_ids[i % n_channels]].append(tiles[i])
 
         remaining_tiles = tiles[assigned_count:]
-        main_mapping = self._create_mapping_from_specs(matrix, chip, main_assignments)
+        main_mapping = self._create_mapping_from_specs(matrix, accelerator, main_assignments)
 
         # If no remaining tiles, we're done
         if not remaining_tiles:
             self._log(current_iteration, f"    No remaining tiles, assignment complete")
-            return self._validate_and_simulate(chip, main_mapping)
+            return self._validate_and_evaluate(accelerator, main_mapping)
 
         self._log(current_iteration, f"    Remaining {len(remaining_tiles)} tiles for recursive processing")
 
@@ -245,7 +244,7 @@ class AgentGridSearchStrategy:
         if current_iteration >= self.max_iterations:
             self._log(current_iteration, f"    Max recursion depth ({self.max_iterations}) reached, using round-robin fallback")
             # Fallback: Use round-robin distribution for remaining tiles
-            return self._round_robin_fallback(matrix, chip, main_assignments, remaining_tiles)
+            return self._round_robin_fallback(matrix, accelerator, main_assignments, remaining_tiles)
 
         # Handle tail tiles by constructing exact geometric sub-regions
         sub_shapes = self._construct_tail_subregions(row_bounds, col_bounds, len(remaining_tiles), matrix.batch_size)
@@ -256,7 +255,7 @@ class AgentGridSearchStrategy:
         sub_mappings: List[Mapping] = []
         for i, sub_shape in enumerate(sub_shapes):
             self._log(current_iteration, f"    Processing sub-region {i+1}: {sub_shape.rows}x{sub_shape.cols}x{sub_shape.batch_size}")
-            sub_result = self.find_optimal_mapping(sub_shape, chip, available_dies, current_iteration + 1)
+            sub_result = self.find_optimal_mapping(sub_shape, accelerator, available_channels, current_iteration + 1)
             if not sub_result:
                 self._log(current_iteration, f"    Sub-region {i+1} has no solution")
                 return None
@@ -265,7 +264,7 @@ class AgentGridSearchStrategy:
 
         # Combine main mapping with sub-mappings
         combined_mapping = self._combine_mappings(main_mapping, sub_mappings)
-        return self._validate_and_simulate(chip, combined_mapping)
+        return self._validate_and_evaluate(accelerator, combined_mapping)
 
     # ---------------
     # Geometry and tiling helpers
@@ -293,14 +292,14 @@ class AgentGridSearchStrategy:
     def _create_mapping_from_specs(
         self,
         matrix: MatrixShape,
-        chip: Chip,
+        accelerator: Accelerator,
         assignments: Dict[str, List[MatrixShape]],
     ) -> Mapping:
         """Create a mapping object from MatrixShape assignments."""
-        mapping = Mapping(matrix=matrix, chip=chip)
-        for die_id, shape_list in assignments.items():
+        mapping = Mapping(matrix=matrix, accelerator=accelerator)
+        for channel_id, shape_list in assignments.items():
             for shape in shape_list:
-                mapping.add_tile(die_id, shape.rows, shape.cols, shape.batch_size)
+                mapping.add_tile(channel_id, shape.rows, shape.cols, shape.batch_size)
         return mapping
 
     def _construct_tail_subregions(
@@ -414,52 +413,51 @@ class AgentGridSearchStrategy:
     # ---------------
     # Memoization
     # ---------------
-    def _memo_key(self, matrix: MatrixShape, available_dies: Set[str]) -> Tuple:
+    def _memo_key(self, matrix: MatrixShape, available_channels: Set[str]) -> Tuple:
         """Create a memoization key for the subproblem."""
-        return (matrix.rows, matrix.cols, matrix.batch_size, tuple(sorted(available_dies)))
+        return (matrix.rows, matrix.cols, matrix.batch_size, tuple(sorted(available_channels)))
 
     def _round_robin_fallback(
         self,
         matrix: MatrixShape,
-        chip: Chip,
+        accelerator: Accelerator,
         main_assignments: Dict[str, List[MatrixShape]],
         remaining_tiles: List[MatrixShape]
     ) -> Optional[MappingResult]:
         """Fallback strategy: distribute remaining tiles using round-robin."""
-        die_ids = sorted(list(main_assignments.keys()))
+        channel_ids = sorted(list(main_assignments.keys()))
 
         # Add remaining tiles using round-robin
         for i, tile_shape in enumerate(remaining_tiles):
-            die_id = die_ids[i % len(die_ids)]
-            main_assignments[die_id].append(tile_shape)
+            channel_id = channel_ids[i % len(channel_ids)]
+            main_assignments[channel_id].append(tile_shape)
 
         # Create and validate the mapping
-        combined_mapping = self._create_mapping_from_specs(matrix, chip, main_assignments)
-        return self._validate_and_simulate(chip, combined_mapping)
+        combined_mapping = self._create_mapping_from_specs(matrix, accelerator, main_assignments)
+        return self._validate_and_evaluate(accelerator, combined_mapping)
     
     def _estimate_utilization(
             self,
-            chip:Chip,
-            matrix:MatrixShape,
-            num_row_splits:int,
-            num_col_splits:int
-        )->float:
+            accelerator: Accelerator,
+            matrix: MatrixShape,
+            num_row_splits: int,
+            num_col_splits: int
+        ) -> float:
 
-        die_spec = chip.spec.die_spec
+        channel_spec = accelerator.spec.channel_spec
         tile_rows = matrix.rows // num_row_splits + (1 if matrix.rows % num_row_splits != 0 else 0)
         tile_cols = matrix.cols // num_col_splits + (1 if matrix.cols % num_col_splits != 0 else 0)
         batch_size = matrix.batch_size
 
-        input_optimal_latency = ( batch_size * tile_rows * matrix.data_format.input_dtype.bytes_per_element) / (die_spec.get_input_bandwidth()/2)
+        input_optimal_latency = (batch_size * tile_rows * matrix.data_format.input_dtype.bytes_per_element) / (channel_spec.get_input_bandwidth() / 2)
         compute_optimal_latency = max(
-            tile_rows * tile_cols * matrix.data_format.weight_dtype.bytes_per_element / die_spec.memory_bandwidth ,
-            tile_rows * tile_cols * batch_size / die_spec.compute_power
+            tile_rows * tile_cols * matrix.data_format.weight_dtype.bytes_per_element / channel_spec.memory_bandwidth,
+            tile_rows * tile_cols * batch_size / channel_spec.compute_power
         ) * 1000
-        output_optimal_latency = (batch_size * tile_cols  * matrix.data_format.output_dtype.bytes_per_element) / (die_spec.get_output_bandwidth()/2)
+        output_optimal_latency = (batch_size * tile_cols * matrix.data_format.output_dtype.bytes_per_element) / (channel_spec.get_output_bandwidth() / 2)
 
-        optimal_latency = max(input_optimal_latency , output_optimal_latency)
+        optimal_latency = max(input_optimal_latency, output_optimal_latency)
 
-
-        utilization = (batch_size * tile_rows * tile_cols) / (optimal_latency * die_spec.compute_power / 1000)
+        utilization = (batch_size * tile_rows * tile_cols) / (optimal_latency * channel_spec.compute_power / 1000)
 
         return utilization

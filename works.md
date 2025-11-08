@@ -1,0 +1,8 @@
+- [ ] 测试通过 modelmapper 中的现有优化
+- [ ] 将 matrix mapper 作为单个项目使用 内置一个简易的模拟器
+  - [ ] 删减代码, 保留核心的功能
+- [ ] 考虑 matrix mapper 对外的接口, 怎么展示 mapping 
+- [ ] 考虑指令设计与生成
+- [ ] 考虑模拟器编写
+  - [ ] 测试通过 FFN 的模块
+- [ ] Attention 模块的 pass 编写
