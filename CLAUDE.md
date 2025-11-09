@@ -4,16 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PiMapper is a Python framework for mapping neural network models to Processing-In-Memory (PIM) hardware architectures. It converts PyTorch models into computation graphs, optimizes them, maps matrix operations to hardware tiles, and simulates execution.
+PiMapper is a Python framework for mapping neural network models to Processing-In-Memory (PIM) hardware architectures. It converts PyTorch models into computation graphs, optimizes them, maps matrix operations to hardware channels, and simulates execution.
 
 ## Running Tests
 
 ```bash
 # Run the full pipeline test (tests model tracing, normalization, and simplification)
 python test_full_pipeline.py
-```
 
-This test validates the complete conversion pipeline from PyTorch model to optimized computation graph, verifying that shape information is preserved through all transformation stages.
+# Run matrix fusion tests
+python test_matrix_fusion.py
+
+# Run simulator tests
+python test_simulator.py
+```
 
 ## Core Architecture
 
@@ -25,14 +29,14 @@ The system follows a three-stage pipeline:
    - Key function: `build_computation_graph()` - full pipeline from model config to optimized graph
 
 2. **Matrix Mapping** (`pimapper/matrixmapper/`): Maps matrix operations to hardware tiles
-   - `strategy/trivial.py`: Grid-based tiling with round-robin die assignment
+   - `strategy/trivial.py`: Grid-based tiling with round-robin channel assignment
    - `strategy/h2llm_mapping.py`: H2LLM-specific mapping strategy
-   - `strategy/agent_grid_search.py`: Agent-based grid search optimization
+   - `strategy/recursive_grid_search.py`: Recursive grid search optimization
 
 3. **Simulation** (`pimapper/sim/`): Discrete-event simulation of hardware execution
-   - `sim_engine.py`: SimChip and SimComputeDie classes using Desim framework
-   - Models input/compute/output pipelines with bandwidth and compute constraints
-   - Generates Perfetto trace files for visualization
+   - `executor.py`: Command executors using Desim framework
+   - `graph.py`: CommandGraph for DAG-based command scheduling
+   - `resource.py`: SimHost and SimPIMChannel resource models
 
 ## Core Data Structures
 
@@ -74,13 +78,21 @@ The system follows a three-stage pipeline:
 - `fusionmatrix.py`: FusionMatrixOp for fusing multiple matrix operations with shared inputs
 
 ### Hardware Specs (`pimapper/core/`)
-- `hwspec.py`:
-  - `ComputeDieSpec`: Immutable die specification (compute_power, bandwidth, memory_bandwidth)
-  - `Chip` and `ComputeDie`: Runtime hardware entities
-- `matrixspec.py`:
-  - `MatrixShape`: Matrix dimensions with data format
-  - `Tile`: Submatrix with dimensions (no position)
-  - `Mapping`: Bidirectional mapping between tiles and compute dies
+
+**`hwspec.py`**:
+- `PIMChannelSpec`: Immutable channel specification (compute_power, bandwidth, memory_bandwidth)
+  - Supports either separate input/output bandwidth OR shared bandwidth (mutually exclusive)
+- `AcceleratorSpec`: Immutable blueprint for accelerator with homogeneous PIM channels
+- `PIMChannel`: Runtime channel entity
+- `Accelerator`: Runtime accelerator composed of host and PIM channels
+- Backwards compatibility: `ComputeDieSpec`/`ComputeDie` (old names for PIMChannelSpec/PIMChannel), `ChipSpec`/`Chip` (old names for AcceleratorSpec/Accelerator)
+
+**`matrixspec.py`**:
+- `DataType`: Enum for FP16, INT8, INT4, FP8
+- `DataFormat`: Configuration for input/output/weight dtypes
+- `MatrixShape`: Matrix dimensions with data format
+- `Tile`: Submatrix with dimensions (no position)
+- `Mapping`: Bidirectional mapping between tiles and PIM channels
 
 ### Model Configuration (`pimapper/model/`)
 
@@ -93,6 +105,23 @@ The system follows a three-stage pipeline:
 **`LLaMALayer`** (`base.py`): Single transformer layer implementation
 - Includes attention (wq, wk, wv, wo), FFN (w1, w2, w3), RMSNorm, and RotaryPositionEmbedding
 - Used as the tracing target in `build_computation_graph()`
+
+### Simulation (`pimapper/sim/`)
+
+**Command System** (`pimapper/core/instruction.py`):
+- `CommandBase`: Base class for all commands with DAG structure (input_commands, output_commands, prev_commands, next_commands)
+- `HostWriteBufferCommand`: Host writes data to PIM channel buffer
+- `HostReadBufferCommand`: Host reads data from PIM channel buffer
+- `PIMComputeCommand`: PIM channel performs computation
+
+**Execution** (`executor.py`):
+- `GraphExecuteEngine`: Manages command graph execution with topological ordering
+- Command executors: `HostWriteBufferExecutor`, `HostReadBufferExecutor`, `PIMComputeExecutor`
+- Uses Desim framework for discrete-event simulation
+
+**Resources** (`resource.py`):
+- `SimHost`: Host processor with vector compute semaphore
+- `SimPIMChannel`: PIM channel with host-channel link and compute semaphores
 
 ## Key Workflows
 
@@ -118,24 +147,35 @@ fx_graph, comp_graph = build_computation_graph(
 
 ### Creating a Hardware Mapping
 ```python
-from pimapper.matrixmapper import TrivialTilingStrategy
-from pimapper.core.hwspec import ChipSpec, ComputeDieSpec, Chip
-from pimapper.core.matrixspec import MatrixShape
+from pimapper.core.hwspec import PIMChannelSpec, AcceleratorSpec, Accelerator
+from pimapper.core.matrixspec import MatrixShape, Mapping
 
-die_spec = ComputeDieSpec(compute_power=100, shared_bandwidth=50, memory_bandwidth=1.0)
-chip_spec = ChipSpec(die_count=4, die_spec=die_spec)
-chip = Chip.create_from_spec(chip_spec)
+channel_spec = PIMChannelSpec(compute_power=100, shared_bandwidth=50, memory_bandwidth=1.0)
+accel_spec = AcceleratorSpec(channel_count=4, channel_spec=channel_spec)
+accelerator = Accelerator.create_from_spec(accel_spec)
 
 matrix = MatrixShape(rows=1024, cols=1024)
-strategy = TrivialTilingStrategy()
-mapping = strategy.create_balanced_mapping(matrix, chip)
+# Use mapping strategies from pimapper.matrixmapper.strategy
 ```
 
 ### Running Simulation
 ```python
-from pimapper.sim.sim_engine import simulate
+from pimapper.sim.executor import GraphExecuteEngine
+from pimapper.sim.graph import CommandGraph
+from pimapper.sim.resource import SimHost, SimPIMChannel
+from Desim.Core import SimSession
 
-cycles = simulate(chip, mapping, save_trace=True, trace_filename="trace.json")
+SimSession.reset()
+SimSession.init()
+
+# Create command graph, host, and channels
+graph = CommandGraph()
+host = SimHost()
+channels = [SimPIMChannel() for _ in range(5)]
+
+# Create executor and run
+executor = GraphExecuteEngine(graph, host, channels)
+SimSession.scheduler.run()
 ```
 
 ## Graph Optimization Passes
@@ -182,5 +222,6 @@ stats = manager.run(graph, mode="sequential")
 - **Op Types**: Use `op_type` class variable to identify operation types. This is a string like "matmul", "vector_add", "call_function", etc.
 - **Shape Tracking**: Shape and dtype information is stored in `Op.results` as a list of `GraphTensor` objects. Always preserve this during transformations.
 - **Automatic Edge Creation**: When calling `create_node()`, edges are automatically created by extracting string references from `op.args` and `op.kwargs`. Don't manually add edges.
-- **Bandwidth Modes**: Dies support either separate input/output bandwidth OR shared bandwidth (mutually exclusive)
+- **Bandwidth Modes**: PIM channels support either separate input/output bandwidth OR shared bandwidth (mutually exclusive)
 - **Data Formats**: `DataFormat` specifies input/output/weight dtypes (FP16, INT8, INT4, FP8)
+- **Backwards Compatibility**: The codebase uses "PIM channel" terminology but maintains backwards compatibility with "compute die" and "chip" naming
