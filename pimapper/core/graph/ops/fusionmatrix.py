@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any, ClassVar, Optional
 
 from pimapper.core.graph.ops.base import GraphTensor, Op, ResultFilter, TensorTransform
+from pimapper.core.graph.ops.native import MatMulOp
 
 
 class FusionStrategy(Enum):
@@ -35,7 +36,8 @@ class MergeTreeNode:
         is_leaf: 是否为叶节点
         op_name: 原始 Op 的节点名称（仅叶节点）
         op: 原始 Op 对象（仅叶节点）
-        shape: 输出张量形状
+        output_shape: 输出张量形状 (batch_dims..., rows, cols)
+        weight_shape: 权重矩阵形状 (rows, cols)，用于硬件映射
         latest_start_time: 最晚开工时间
         strategy: 融合策略（仅内部节点）
         children: 子节点列表（仅内部节点）
@@ -47,7 +49,8 @@ class MergeTreeNode:
     is_leaf: bool
     op_name: Optional[str] = None
     op: Optional[Op] = None
-    shape: Optional[tuple[int, ...]] = None
+    output_shape: Optional[tuple[int, ...]] = None
+    weight_shape: Optional[tuple[int, int]] = None
     latest_start_time: float = 0.0
     strategy: Optional[FusionStrategy] = None
     children: list[MergeTreeNode] = dataclass_field(default_factory=list)
@@ -69,19 +72,44 @@ class MergeTreeNode:
         Args:
             op_name: 原始 Op 的节点名称
             op: 原始 Op 对象
-            shape: 输出张量形状
+            shape: 输出张量形状 (batch_dims..., rows, cols)
             latest_start_time: 最晚开工时间
 
         Returns:
             叶节点
         """
-        # 对于矩阵运算，col_size 是输出矩阵的列数（最后一个维度）
-        col_size = shape[-1] if shape and len(shape) >= 2 else 0
+        # 提取权重矩阵形状 (rows, cols)
+        weight_shape = None
+
+        # 首先尝试从 metadata 中提取权重形状（对于 Linear 层）
+        if hasattr(op, 'metadata') and op.metadata:
+            custom = op.metadata.get('custom', {})
+            metadata_weight_shape = custom.get('weight_shape')
+
+            if metadata_weight_shape is not None:
+                # metadata 中的 weight_shape 是 (out_features, in_features)
+                # 检查是否需要转置
+                transpose_b = op.kwargs.get('transpose_b', False) if hasattr(op, 'kwargs') else False
+
+                if transpose_b:
+                    # 转置：(out_features, in_features) -> (in_features, out_features)
+                    weight_shape = (metadata_weight_shape[1], metadata_weight_shape[0])
+                else:
+                    weight_shape = metadata_weight_shape
+
+        # 如果 metadata 中没有，回退到从输出形状提取（不准确）
+        if weight_shape is None and shape and len(shape) >= 2:
+            weight_shape = (shape[-2], shape[-1])
+
+        # col_size 是权重矩阵的列数
+        col_size = weight_shape[1] if weight_shape else (shape[-1] if shape and len(shape) >= 2 else 0)
+
         return cls(
             is_leaf=True,
             op_name=op_name,
             op=op,
-            shape=shape,
+            output_shape=shape,
+            weight_shape=weight_shape,
             latest_start_time=latest_start_time,
             col_size=col_size,
         )
@@ -108,18 +136,33 @@ class MergeTreeNode:
 
         # 计算融合后的形状（假设所有子节点的行数相同）
         total_cols = sum(child.col_size for child in children)
-        first_shape = children[0].shape
-        if first_shape and len(first_shape) >= 2:
-            fused_shape = first_shape[:-1] + (total_cols,)
+        first_output_shape = children[0].output_shape
+
+        # 计算融合后的输出形状
+        if first_output_shape and len(first_output_shape) >= 2:
+            fused_output_shape = first_output_shape[:-1] + (total_cols,)
         else:
-            fused_shape = None
+            fused_output_shape = None
+
+        # 计算融合后的权重矩阵形状 (rows, fused_cols)
+        # 从子节点的 weight_shape 中提取行数（而不是从 output_shape）
+        fused_weight_shape = None
+        first_weight_shape = children[0].weight_shape
+        if first_weight_shape is not None:
+            rows = first_weight_shape[0]
+            fused_weight_shape = (rows, total_cols)
+        elif first_output_shape and len(first_output_shape) >= 2:
+            # 回退方案：从输出形状提取（不准确）
+            rows = first_output_shape[-2]
+            fused_weight_shape = (rows, total_cols)
 
         # 使用子节点中最小的 latest_start_time
         lst = min(child.latest_start_time for child in children)
 
         return cls(
             is_leaf=False,
-            shape=fused_shape,
+            output_shape=fused_output_shape,
+            weight_shape=fused_weight_shape,
             latest_start_time=lst,
             strategy=strategy,
             children=children,
@@ -315,14 +358,16 @@ class MergeTreeNode:
             return result
 
 
-class FusionMatrixOp(Op):
+class FusionMatrixOp(MatMulOp):
     """融合矩阵操作
 
     将多个输入相同的矩阵运算融合为一个操作，使用合并树管理融合顺序。
+    继承自 MatMulOp，可以被 MatrixMappingPass 识别和映射。
 
     Attributes:
         merge_tree: 合并树根节点
         shared_inputs: 共享的输入节点名称列表
+        fused_weight_shape: 融合后的权重矩阵形状 (rows, cols)，用于硬件映射
     """
 
     op_type: ClassVar[str] = "fusion_matrix"
@@ -342,19 +387,35 @@ class FusionMatrixOp(Op):
             args: 操作参数
             kwargs: 操作关键字参数
         """
+        # 计算偏移量
+        merge_tree.compute_offsets(0)
+
+        # 提取融合后的权重矩阵形状
+        fused_weight_shape = merge_tree.weight_shape
+
+        # 准备 kwargs，包含融合矩阵的特殊信息
+        fusion_kwargs = kwargs or {}
+        if fused_weight_shape:
+            fusion_kwargs['matrix_shape'] = fused_weight_shape
+
+        # 调用父类构造函数
         super().__init__(
-            args=args or tuple(shared_inputs),
-            kwargs=kwargs or {},
+            transpose_a=fusion_kwargs.get('transpose_a', False),
+            transpose_b=fusion_kwargs.get('transpose_b', False),
+            matrix_shape=fused_weight_shape
         )
+
+        # 覆盖 args（使用共享输入）
+        self.args = args or tuple(shared_inputs)
+
+        # 存储融合特定的属性
         self.merge_tree = merge_tree
         self.shared_inputs = shared_inputs
-
-        # 计算偏移量
-        self.merge_tree.compute_offsets(0)
+        self.fused_weight_shape = fused_weight_shape
 
         # 设置 results：融合后的输出形状
-        if merge_tree.shape:
-            self.results = [GraphTensor(shape=merge_tree.shape)]
+        if merge_tree.output_shape:
+            self.results = [GraphTensor(shape=merge_tree.output_shape)]
         else:
             self.results = []
 

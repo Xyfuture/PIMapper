@@ -1,11 +1,16 @@
 from dataclasses import dataclass
+from typing import Optional, TYPE_CHECKING
 from .matrixspec import Mapping
+
+if TYPE_CHECKING:
+    from ..matrixmapper.utils import MatrixAllocationTree
 
 
 @dataclass
 class MappingResult:
     mapping: Mapping
     latency: float
+    allocation_tree: Optional['MatrixAllocationTree'] = None
 
     def get_chip_total_compute_power_gops(self) -> float:
         return self.mapping.chip.total_compute_power_gops

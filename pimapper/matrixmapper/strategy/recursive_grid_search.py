@@ -8,6 +8,7 @@ from ...core.hwspec import Accelerator
 from ...core.matrixspec import Mapping, MatrixShape
 from ..evaluator import evaluate
 from ...core.utils import MappingResult
+from ..utils import MatrixAllocationTree, InternalNode
 
 logger = logging.getLogger("recursive_grid_search")
 
@@ -51,12 +52,17 @@ class RecursiveGridSearchStrategy:
         indent = "  " * iteration
         logger.debug(f"{indent}{message}")
 
-    def _validate_and_evaluate(self, accelerator: Accelerator, mapping: Mapping) -> Optional[MappingResult]:
+    def _validate_and_evaluate(
+        self,
+        accelerator: Accelerator,
+        mapping: Mapping,
+        allocation_tree: Optional[MatrixAllocationTree] = None
+    ) -> Optional[MappingResult]:
         """Validate mapping and run evaluation, return None on failure."""
         try:
             mapping.check_all()
             latency = evaluate(accelerator, mapping)
-            return MappingResult(mapping=mapping, latency=latency)
+            return MappingResult(mapping=mapping, latency=latency, allocation_tree=allocation_tree)
         except Exception as e:
             logger.error(f"Validation/evaluation failed: {type(e).__name__}: {e}")
             logger.debug(f"Failed mapping details: {mapping}")
@@ -166,6 +172,19 @@ class RecursiveGridSearchStrategy:
         if best:
             self.memo[key] = best
             self._log(current_iteration, f"[Iteration {current_iteration}] Complete, best latency: {best.latency}")
+
+            # Only assign tile IDs at the root level (iteration 0) after finding the best result
+            if current_iteration == 0 and best.allocation_tree is not None:
+                self._log(current_iteration, "  Assigning tile IDs to the best allocation tree...")
+                success = best.allocation_tree.assign_tile_ids()
+                if success:
+                    tree_valid = best.allocation_tree.validate(check_allocations=True)
+                    if tree_valid:
+                        self._log(current_iteration, "  Tile ID assignment successful and tree validated")
+                    else:
+                        logger.warning("Tree validation failed after tile ID assignment")
+                else:
+                    logger.warning("Tile ID assignment failed")
         else:
             self._log(current_iteration, f"[Iteration {current_iteration}] Complete, no valid config found")
 
@@ -182,8 +201,9 @@ class RecursiveGridSearchStrategy:
         num_split_row: int,
         num_split_col: int,
         current_iteration: int,
+        parent_tree_node: Optional[InternalNode] = None,
     ) -> Optional[MappingResult]:
-        """Evaluate a specific split configuration and return the mapping result."""
+        """Evaluate a specific split configuration and return the mapping result with allocation tree."""
 
         # Compute split boundaries with ceiling on edge tiles
         row_bounds = self._calculate_split_boundaries(matrix.rows, num_split_row)
@@ -210,6 +230,23 @@ class RecursiveGridSearchStrategy:
         if n_channels == 0:
             return None
 
+        # Create or use tree node for this split
+        if parent_tree_node is None:
+            # This is the root - create the tree
+            tree = MatrixAllocationTree.create_root(
+                rows=matrix.rows,
+                cols=matrix.cols,
+                batch_size=matrix.batch_size,
+                num_split_row=num_split_row,
+                num_split_col=num_split_col,
+                channel_ids=channel_ids
+            )
+            current_node = tree.root
+        else:
+            # This is a child node - use the provided parent
+            current_node = parent_tree_node
+            tree = None
+
         # Progress guarantee: if we have enough channels, assign all tiles
         if n_tiles <= n_channels:
             self._log(current_iteration, f"    Tiles <= channels, direct assignment")
@@ -217,8 +254,13 @@ class RecursiveGridSearchStrategy:
             for i, tile in enumerate(tiles):
                 assignments[channel_ids[i % n_channels]].append(tile)
 
+            # Add leaf node to tree
+            current_node.add_leaf_child(num_tiles=n_tiles)
+
             main_mapping = self._create_mapping_from_specs(matrix, accelerator, assignments)
-            return self._validate_and_evaluate(accelerator, main_mapping)
+
+            # Don't assign tile IDs during recursion - only build tree structure
+            return self._validate_and_evaluate(accelerator, main_mapping, tree)
 
         # Round-robin distribution: complete rounds only
         tiles_per_channel = n_tiles // n_channels
@@ -233,10 +275,15 @@ class RecursiveGridSearchStrategy:
         remaining_tiles = tiles[assigned_count:]
         main_mapping = self._create_mapping_from_specs(matrix, accelerator, main_assignments)
 
+        # Add leaf node for assigned tiles
+        current_node.add_leaf_child(num_tiles=assigned_count)
+
         # If no remaining tiles, we're done
         if not remaining_tiles:
             self._log(current_iteration, f"    No remaining tiles, assignment complete")
-            return self._validate_and_evaluate(accelerator, main_mapping)
+
+            # Don't assign tile IDs during recursion - only build tree structure
+            return self._validate_and_evaluate(accelerator, main_mapping, tree)
 
         self._log(current_iteration, f"    Remaining {len(remaining_tiles)} tiles for recursive processing")
 
@@ -244,31 +291,116 @@ class RecursiveGridSearchStrategy:
         if current_iteration >= self.max_iterations:
             self._log(current_iteration, f"    Max recursion depth ({self.max_iterations}) reached, using round-robin fallback")
             # Fallback: Use round-robin distribution for remaining tiles
-            return self._round_robin_fallback(matrix, accelerator, main_assignments, remaining_tiles)
+            result = self._round_robin_fallback(matrix, accelerator, main_assignments, remaining_tiles)
+
+            # Attach tree to result but don't assign IDs yet
+            if tree is not None and result is not None:
+                result.allocation_tree = tree
+
+            return result
 
         # Handle tail tiles by constructing exact geometric sub-regions
         sub_shapes = self._construct_tail_subregions(row_bounds, col_bounds, len(remaining_tiles), matrix.batch_size)
 
         self._log(current_iteration, f"    Constructed {len(sub_shapes)} tail sub-regions")
 
+        # Calculate grid shape for each tail region
+        tail_grid_info = self._calculate_tail_grid_info(row_bounds, col_bounds, len(remaining_tiles))
+
         # Recursively solve each subregion
         sub_mappings: List[Mapping] = []
         for i, sub_shape in enumerate(sub_shapes):
             self._log(current_iteration, f"    Processing sub-region {i+1}: {sub_shape.rows}x{sub_shape.cols}x{sub_shape.batch_size}")
-            sub_result = self.find_optimal_mapping(sub_shape, accelerator, available_channels, current_iteration + 1)
+
+            # Get grid info for this tail region
+            tail_info = tail_grid_info[i] if i < len(tail_grid_info) else None
+            if tail_info is None:
+                logger.error(f"Missing tail grid info for sub-region {i}")
+                return None
+
+            num_tail_tiles, tail_grid_shape, tail_split_row, tail_split_col = tail_info
+
+            # Add internal child node to tree
+            child_node = current_node.add_internal_child(
+                rows=sub_shape.rows,
+                cols=sub_shape.cols,
+                batch_size=sub_shape.batch_size,
+                num_split_row=tail_split_row,
+                num_split_col=tail_split_col,
+                num_source_tiles=num_tail_tiles,
+                source_grid_shape=tail_grid_shape
+            )
+
+            # Recursively solve with the child node
+            sub_result = self._evaluate_split_configuration(
+                sub_shape,
+                accelerator,
+                available_channels,
+                tail_split_row,
+                tail_split_col,
+                current_iteration + 1,
+                parent_tree_node=child_node
+            )
+
             if not sub_result:
                 self._log(current_iteration, f"    Sub-region {i+1} has no solution")
                 return None
+
             # Simply copy the mapping (no coordinate offset needed since Tile has no position)
             sub_mappings.append(self._copy_mapping(sub_result.mapping))
 
         # Combine main mapping with sub-mappings
         combined_mapping = self._combine_mappings(main_mapping, sub_mappings)
-        return self._validate_and_evaluate(accelerator, combined_mapping)
+
+        # Don't assign tile IDs during recursion - only build tree structure
+        return self._validate_and_evaluate(accelerator, combined_mapping, tree)
 
     # ---------------
     # Geometry and tiling helpers
     # ---------------
+    def _calculate_tail_grid_info(
+        self,
+        row_bounds: List[Tuple[int, int]],
+        col_bounds: List[Tuple[int, int]],
+        num_remaining_tiles: int
+    ) -> List[Tuple[int, Tuple[int, int], int, int]]:
+        """Calculate grid information for tail regions.
+
+        Returns:
+            List of tuples: (num_tiles, grid_shape, num_split_row, num_split_col)
+        """
+        if num_remaining_tiles == 0:
+            return []
+
+        g_rows = len(row_bounds)
+        g_cols = len(col_bounds)
+
+        # Analyze tail structure
+        full_rows = num_remaining_tiles // g_cols
+        suffix_cols = num_remaining_tiles % g_cols
+
+        result = []
+
+        if full_rows == 0 and suffix_cols > 0:
+            # Case 1: Only partial row suffix
+            # Grid shape: 1 row x suffix_cols columns
+            result.append((suffix_cols, (1, suffix_cols), 1, suffix_cols))
+
+        elif suffix_cols == 0 and full_rows > 0:
+            # Case 2: Only complete bottom rows
+            # Grid shape: full_rows x g_cols
+            result.append((num_remaining_tiles, (full_rows, g_cols), full_rows, g_cols))
+
+        elif suffix_cols > 0 and full_rows > 0:
+            # Case 3: Partial row + complete rows below
+            # Two regions:
+            # 1. Partial row: 1 row x suffix_cols columns
+            result.append((suffix_cols, (1, suffix_cols), 1, suffix_cols))
+            # 2. Complete rows: full_rows x g_cols
+            result.append((full_rows * g_cols, (full_rows, g_cols), full_rows, g_cols))
+
+        return result
+
     def _calculate_split_boundaries(self, dimension: int, num_splits: int) -> List[Tuple[int, int]]:
         """Calculate split boundaries with ceiling operation for edge tiles."""
         if num_splits <= 0:

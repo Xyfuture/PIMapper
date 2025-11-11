@@ -29,6 +29,11 @@ class ModelConfig:
     def per_head_size(self):
         return self.hidden_size // self.num_attention_heads
 
+@dataclass
+class InferenceConfig:
+    batch_size: int = 1
+    past_sequence_length: int = 1024
+
 
 class RotaryPositionEmbedding(nn.Module):
     def __init__(self, head_dim, base=10000.0, dtype=torch.float16):
@@ -79,13 +84,54 @@ class RotaryPositionEmbedding(nn.Module):
 
 
 
+class FFNLayer(nn.Module):
+    def __init__(
+        self,
+        model_config: ModelConfig
+    ):
+        super().__init__()
+
+        self.config = model_config
+
+        self.dim = model_config.hidden_size
+        self.ffn_dim = model_config.intermediate_size
+        self.dtype = torch.float16
+
+        # FFN Block
+        self.w1 = nn.Linear(
+            self.dim,
+            self.ffn_dim,
+            bias=False,
+            dtype=self.dtype
+        )
+        self.w2 = nn.Linear(
+            self.ffn_dim,
+            self.dim,
+            bias=False,
+            dtype=self.dtype
+        )
+        self.w3 = nn.Linear(
+            self.dim,
+            self.ffn_dim,
+            bias=False,
+            dtype=self.dtype
+        )
+
+    def forward(self, x):
+        # FFN: w2(w1(x) * silu(w3(x)))
+        x1 = self.w1(x)
+        x3 = F.silu(self.w3(x))
+        x2 = self.w2(x1 * x3)
+        return x2
+
+
 class LLaMALayer(nn.Module):
     def __init__(
         self,
         model_config: ModelConfig
     ):
         super().__init__()
-        
+
         self.config = model_config
 
         self.dim = model_config.hidden_size

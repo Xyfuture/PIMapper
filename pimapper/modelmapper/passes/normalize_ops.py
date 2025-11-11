@@ -131,8 +131,9 @@ class NormalizeOpsPass(Pass):
         for op_class in self._registered_ops:
             try:
                 native_op = op_class.convert_from_torch(op)
-                # 保留原 op 的 results
+                # 保留原 op 的 results 和 metadata
                 native_op.results = op.results
+                native_op.metadata = op.metadata
                 return native_op
             except Exception:
                 continue
