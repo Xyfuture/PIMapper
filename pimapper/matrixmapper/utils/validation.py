@@ -114,9 +114,11 @@ def print_mapping_tree_comparison(mapping: Mapping, tree: MatrixAllocationTree) 
         print(f"    Mapping: {len(mapping_channel_tiles)} tiles")
 
         if tree_allocs:
-            tile_ids = [a.tile_id for a in tree_allocs]
+            tile_ids_local = [a.tile_id for a in tree_allocs]
+            tile_ids_global = [a.global_tile_id for a in tree_allocs]
             positions = [a.tile_index_in_grid for a in tree_allocs]
-            print(f"    Tree tile IDs: {tile_ids}")
+            print(f"    Tree tile IDs (local): {tile_ids_local}")
+            print(f"    Tree tile IDs (global): {tile_ids_global}")
             print(f"    Tree positions: {positions}")
 
         if mapping_channel_tiles:
@@ -153,7 +155,8 @@ def get_channel_statistics(mapping: Mapping, tree: MatrixAllocationTree) -> Dict
 
         stats[channel_id] = {
             "num_tiles": len(tree_allocs),
-            "tile_ids": [a.tile_id for a in tree_allocs],
+            "tile_ids_local": [a.tile_id for a in tree_allocs],
+            "tile_ids_global": [a.global_tile_id for a in tree_allocs],
             "total_operations": total_ops,
             "tile_shapes": [(t.num_rows, t.num_cols, t.num_batches) for t in mapping_channel_tiles]
         }

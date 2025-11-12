@@ -5,6 +5,10 @@ tile allocations during recursive grid search.
 """
 
 from pimapper.matrixmapper.utils import MatrixAllocationTree
+from pimapper.matrixmapper.strategy.h2llm_mapping import H2LLMTilingStrategy
+from pimapper.matrixmapper.strategy.trivial import TrivialTilingStrategy
+from pimapper.core.hwspec import PIMChannelSpec, AcceleratorSpec, Accelerator
+from pimapper.core.matrixspec import MatrixShape
 
 
 def test_simple_allocation():
@@ -47,9 +51,10 @@ def test_simple_allocation():
     print("\nAllocations by channel:")
     allocations = tree.get_all_allocations()
     for channel_id, allocs in sorted(allocations.items()):
-        tile_ids = [a.tile_id for a in allocs]
+        tile_ids_local = [a.tile_id for a in allocs]
+        tile_ids_global = [a.global_tile_id for a in allocs]
         positions = [a.tile_index_in_grid for a in allocs]
-        print(f"  {channel_id}: tiles {tile_ids}, positions {positions}")
+        print(f"  {channel_id}: local={tile_ids_local}, global={tile_ids_global}, positions={positions}")
 
     print()
 
@@ -111,9 +116,10 @@ def test_allocation_with_tail():
     print("\nAllocations by channel:")
     allocations = tree.get_all_allocations()
     for channel_id, allocs in sorted(allocations.items()):
-        tile_ids = [a.tile_id for a in allocs]
+        tile_ids_local = [a.tile_id for a in allocs]
+        tile_ids_global = [a.global_tile_id for a in allocs]
         positions = [a.tile_index_in_grid for a in allocs]
-        print(f"  {channel_id}: tiles {tile_ids}, positions {positions}")
+        print(f"  {channel_id}: local={tile_ids_local}, global={tile_ids_global}, positions={positions}")
 
     print()
 
@@ -174,9 +180,10 @@ def test_allocation_with_two_tail_regions():
     print("\nAllocations by channel:")
     allocations = tree.get_all_allocations()
     for channel_id, allocs in sorted(allocations.items()):
-        tile_ids = [a.tile_id for a in allocs]
+        tile_ids_local = [a.tile_id for a in allocs]
+        tile_ids_global = [a.global_tile_id for a in allocs]
         positions = [a.tile_index_in_grid for a in allocs]
-        print(f"  {channel_id}: tiles {tile_ids}, positions {positions}")
+        print(f"  {channel_id}: local={tile_ids_local}, global={tile_ids_global}, positions={positions}")
 
     print()
 
@@ -237,9 +244,10 @@ def test_complex_recursive_allocation():
     print("\nAllocations by channel:")
     allocations = tree.get_all_allocations()
     for channel_id, allocs in sorted(allocations.items()):
-        tile_ids = [a.tile_id for a in allocs]
+        tile_ids_local = [a.tile_id for a in allocs]
+        tile_ids_global = [a.global_tile_id for a in allocs]
         positions = [a.tile_index_in_grid for a in allocs]
-        print(f"  {channel_id}: tiles {tile_ids}, positions {positions}")
+        print(f"  {channel_id}: local={tile_ids_local}, global={tile_ids_global}, positions={positions}")
 
     # Verify each channel gets tiles
     for channel_id in channel_ids:
@@ -249,11 +257,180 @@ def test_complex_recursive_allocation():
     print()
 
 
+def test_h2llm_strategy():
+    """Test H2LLM strategy allocation tree."""
+    print("=" * 80)
+    print("Test 5: H2LLM Strategy Allocation Tree")
+    print("=" * 80)
+
+    # Create hardware configuration
+    channel_spec = PIMChannelSpec(
+        compute_power=100.0,
+        shared_bandwidth=50.0,
+        memory_bandwidth=1.0
+    )
+    accel_spec = AcceleratorSpec(channel_count=4, channel_spec=channel_spec)
+    accelerator = Accelerator.create_from_spec(accel_spec)
+
+    # Create matrix shape
+    matrix_shape = MatrixShape(rows=128, cols=128, batch_size=1)
+
+    # Create H2LLM strategy and generate mapping
+    strategy = H2LLMTilingStrategy()
+    mapping, tree = strategy.create_mapping(matrix_shape, accelerator)
+
+    print(f"Matrix: {matrix_shape.rows}x{matrix_shape.cols}x{matrix_shape.batch_size}")
+    print(f"Channels: {len(accelerator.channels)}")
+    print(f"Tree structure valid: {tree.validate(check_allocations=True)}")
+
+    # Print tree structure
+    print("\nTree structure:")
+    tree.print_tree()
+
+    # Get allocations by channel
+    print("\nAllocations by channel:")
+    allocations = tree.get_all_allocations()
+    for channel_id, allocs in sorted(allocations.items()):
+        tile_ids = [a.tile_id for a in allocs]
+        print(f"  {channel_id}: {len(tile_ids)} tiles - {tile_ids}")
+
+    # Verify mapping consistency
+    print("\nMapping verification:")
+    for channel_id, tiles in mapping.placement.items():
+        num_tiles_in_mapping = len(tiles)
+        num_tiles_in_tree = len(allocations.get(channel_id, []))
+        print(f"  {channel_id}: mapping={num_tiles_in_mapping} tiles, tree={num_tiles_in_tree} tiles")
+        assert num_tiles_in_mapping == num_tiles_in_tree, f"Mismatch for {channel_id}"
+
+    print("\n[PASS] H2LLM strategy test passed!")
+    print()
+
+
+def test_trivial_strategy():
+    """Test Trivial strategy allocation tree."""
+    print("=" * 80)
+    print("Test 6: Trivial Strategy Allocation Tree")
+    print("=" * 80)
+
+    # Create hardware configuration
+    channel_spec = PIMChannelSpec(
+        compute_power=100.0,
+        shared_bandwidth=50.0,
+        memory_bandwidth=1.0
+    )
+    accel_spec = AcceleratorSpec(channel_count=3, channel_spec=channel_spec)
+    accelerator = Accelerator.create_from_spec(accel_spec)
+
+    # Create matrix shape
+    matrix_shape = MatrixShape(rows=90, cols=90, batch_size=1)
+
+    # Create Trivial strategy and generate mapping
+    strategy = TrivialTilingStrategy()
+    mapping, tree = strategy.create_mapping(
+        matrix_shape,
+        accelerator,
+        grid_rows=3,
+        grid_cols=3
+    )
+
+    print(f"Matrix: {matrix_shape.rows}x{matrix_shape.cols}x{matrix_shape.batch_size}")
+    print(f"Grid: 3x3, Channels: {len(accelerator.channels)}")
+    print(f"Tree structure valid: {tree.validate(check_allocations=True)}")
+
+    # Print tree structure
+    print("\nTree structure:")
+    tree.print_tree()
+
+    # Get allocations by channel
+    print("\nAllocations by channel:")
+    allocations = tree.get_all_allocations()
+    for channel_id, allocs in sorted(allocations.items()):
+        tile_ids = [a.tile_id for a in allocs]
+        print(f"  {channel_id}: {len(tile_ids)} tiles - {tile_ids}")
+
+    # Verify mapping consistency
+    print("\nMapping verification:")
+    for channel_id, tiles in mapping.placement.items():
+        num_tiles_in_mapping = len(tiles)
+        num_tiles_in_tree = len(allocations.get(channel_id, []))
+        print(f"  {channel_id}: mapping={num_tiles_in_mapping} tiles, tree={num_tiles_in_tree} tiles")
+        assert num_tiles_in_mapping == num_tiles_in_tree, f"Mismatch for {channel_id}"
+
+    print("\n[PASS] Trivial strategy test passed!")
+    print()
+
+
+def test_trivial_strategy_with_larger_batch():
+    """Test Trivial strategy with larger batch size (batch not split)."""
+    print("=" * 80)
+    print("Test 7: Trivial Strategy with Larger Batch Size")
+    print("=" * 80)
+
+    # Create hardware configuration
+    channel_spec = PIMChannelSpec(
+        compute_power=100.0,
+        shared_bandwidth=50.0,
+        memory_bandwidth=1.0
+    )
+    accel_spec = AcceleratorSpec(channel_count=4, channel_spec=channel_spec)
+    accelerator = Accelerator.create_from_spec(accel_spec)
+
+    # Create matrix shape with larger batch size
+    matrix_shape = MatrixShape(rows=64, cols=64, batch_size=8)
+
+    # Create Trivial strategy and generate mapping
+    strategy = TrivialTilingStrategy()
+    mapping, tree = strategy.create_mapping(
+        matrix_shape,
+        accelerator,
+        grid_rows=2,
+        grid_cols=2
+    )
+
+    print(f"Matrix: {matrix_shape.rows}x{matrix_shape.cols}x{matrix_shape.batch_size}")
+    print(f"Grid: 2x2, Channels: {len(accelerator.channels)}")
+    print(f"Total tiles: 2x2 = 4 (batch not split)")
+    print(f"Tree structure valid: {tree.validate(check_allocations=True)}")
+
+    # Print tree structure
+    print("\nTree structure:")
+    tree.print_tree()
+
+    # Get allocations by channel
+    print("\nAllocations by channel:")
+    allocations = tree.get_all_allocations()
+    for channel_id, allocs in sorted(allocations.items()):
+        tile_ids = [a.tile_id for a in allocs]
+        print(f"  {channel_id}: {len(tile_ids)} tiles - {tile_ids}")
+
+    # Verify mapping consistency
+    print("\nMapping verification:")
+    for channel_id, tiles in mapping.placement.items():
+        num_tiles_in_mapping = len(tiles)
+        num_tiles_in_tree = len(allocations.get(channel_id, []))
+        print(f"  {channel_id}: mapping={num_tiles_in_mapping} tiles, tree={num_tiles_in_tree} tiles")
+        assert num_tiles_in_mapping == num_tiles_in_tree, f"Mismatch for {channel_id}"
+
+        # Verify that each tile has the full batch size
+        for tile in tiles:
+            assert tile.num_batches == matrix_shape.batch_size, \
+                f"Tile batch size {tile.num_batches} != matrix batch size {matrix_shape.batch_size}"
+
+    print("\n[PASS] Trivial strategy with larger batch test passed!")
+    print()
+
+
 if __name__ == "__main__":
+    # Original tests
     test_simple_allocation()
     test_allocation_with_tail()
     test_allocation_with_two_tail_regions()
     test_complex_recursive_allocation()
+
+    # New strategy tests
+    test_h2llm_strategy()
+    test_trivial_strategy()
+    test_trivial_strategy_with_larger_batch()
 
     print("=" * 80)
     print("All tests completed!")

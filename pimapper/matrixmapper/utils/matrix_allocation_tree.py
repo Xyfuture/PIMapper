@@ -27,11 +27,13 @@ class TileAllocation:
     """Represents a tile allocation with its ID and channel assignment.
 
     Attributes:
-        tile_id: Unique identifier for this tile in row-major order
+        tile_id: Local identifier within the current node's grid (0-indexed)
+        global_tile_id: Global unique identifier in the root matrix (row-major order)
         channel_id: ID of the channel this tile is assigned to
         tile_index_in_grid: Position in the grid (row_idx, col_idx) for position tracking
     """
     tile_id: int
+    global_tile_id: int
     channel_id: str
     tile_index_in_grid: Tuple[int, int]  # (row_idx, col_idx) in the grid
 
@@ -52,10 +54,18 @@ class LeafNode:
     allocations: List[TileAllocation] = field(default_factory=list)
     parent: Optional[InternalNode] = None
 
-    def add_allocation(self, tile_id: int, channel_id: str, grid_pos: Tuple[int, int]) -> None:
-        """Add a tile allocation to this leaf node."""
+    def add_allocation(self, tile_id: int, global_tile_id: int, channel_id: str, grid_pos: Tuple[int, int]) -> None:
+        """Add a tile allocation to this leaf node.
+
+        Args:
+            tile_id: Local tile ID within the current node's grid
+            global_tile_id: Global tile ID in the root matrix
+            channel_id: Channel ID for this allocation
+            grid_pos: Grid position (row, col) in the current node
+        """
         self.allocations.append(TileAllocation(
             tile_id=tile_id,
+            global_tile_id=global_tile_id,
             channel_id=channel_id,
             tile_index_in_grid=grid_pos
         ))
@@ -264,18 +274,23 @@ class MatrixAllocationTree:
         total_tiles = self.root.total_tiles()
         available_ids = list(range(total_tiles))
 
-        return self._assign_tile_ids_recursive(self.root, available_ids)
+        # At root level, local IDs are the same as global IDs
+        global_id_mapping = {i: i for i in available_ids}
+
+        return self._assign_tile_ids_recursive(self.root, available_ids, global_id_mapping)
 
     def _assign_tile_ids_recursive(
         self,
         node: InternalNode,
-        available_ids: List[int]
+        available_ids: List[int],
+        global_id_mapping: Dict[int, int]
     ) -> bool:
         """Recursively assign tile IDs to a node and its children.
 
         Args:
             node: Internal node to process
-            available_ids: List of available tile IDs in row-major order
+            available_ids: List of available local tile IDs in row-major order
+            global_id_mapping: Mapping from local tile IDs to global tile IDs
 
         Returns:
             True if assignment successful, False otherwise
@@ -314,14 +329,23 @@ class MatrixAllocationTree:
                 )
                 return False
 
-            # Store source tile IDs in child
-            child.source_tile_ids = child_ids
+            # Store source tile IDs in child (these are the global IDs from parent)
+            child.source_tile_ids = [global_id_mapping[local_id] for local_id in child_ids]
 
             # Remove assigned IDs from remaining pool
             remaining_ids = [tid for tid in remaining_ids if tid not in child_ids]
 
+            # Create local-to-global mapping for child
+            # Child uses local IDs 0 to child_tiles_needed-1
+            # These map to the global IDs from child_ids
+            child_local_ids = list(range(child_tiles_needed))
+            child_global_mapping = {
+                local_id: global_id_mapping[parent_local_id]
+                for local_id, parent_local_id in zip(child_local_ids, child_ids)
+            }
+
             # Recursively assign IDs in the child subtree
-            if not self._assign_tile_ids_recursive(child, list(range(child_tiles_needed))):
+            if not self._assign_tile_ids_recursive(child, child_local_ids, child_global_mapping):
                 return False
 
         # Step 2: Assign remaining IDs to leaf node using round-robin
@@ -339,13 +363,21 @@ class MatrixAllocationTree:
             return False
 
         # Assign tiles to channels using round-robin
-        for i, tile_id in enumerate(remaining_ids):
+        # Note: remaining_ids contains parent's local IDs, but we need to assign
+        # local IDs starting from 0 for the leaf node's perspective
+        for i, parent_local_id in enumerate(remaining_ids):
             channel_id = self.channel_ids[i % self.num_channels]
 
-            # Calculate grid position for this tile ID
-            grid_pos = self._tile_id_to_grid_pos(tile_id, num_cols)
+            # Calculate grid position using the parent's local ID
+            grid_pos = self._tile_id_to_grid_pos(parent_local_id, num_cols)
 
-            node.leaf_child.add_allocation(tile_id, channel_id, grid_pos)
+            # Get the global ID from the mapping
+            global_tile_id = global_id_mapping[parent_local_id]
+
+            # Use index i as the local tile ID (0-indexed within this leaf node)
+            local_tile_id = i
+
+            node.leaf_child.add_allocation(local_tile_id, global_tile_id, channel_id, grid_pos)
 
         return True
 
@@ -488,8 +520,9 @@ class MatrixAllocationTree:
             if node.leaf_child.allocations:
                 tiles_by_channel = node.leaf_child.get_tiles_by_channel()
                 for channel_id, allocs in sorted(tiles_by_channel.items()):
-                    tile_ids = [a.tile_id for a in allocs]
-                    print(f"{prefix}    {channel_id}: tiles {tile_ids}")
+                    tile_ids_local = [a.tile_id for a in allocs]
+                    tile_ids_global = [a.global_tile_id for a in allocs]
+                    print(f"{prefix}    {channel_id}: local={tile_ids_local}, global={tile_ids_global}")
 
         for i, child in enumerate(node.internal_children):
             print(f"{prefix}  InternalChild[{i}]:")

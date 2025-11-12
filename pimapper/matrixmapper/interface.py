@@ -30,10 +30,10 @@ def create_mapping(
 
     if strategy == "trivial":
         strat = TrivialTilingStrategy()
-        mapping = strat.create_balanced_mapping(matrix_shape, accelerator, **kwargs)
+        mapping, tree = strat.create_balanced_mapping(matrix_shape, accelerator, **kwargs)
         from .evaluator import evaluate
         latency = evaluate(accelerator, mapping)
-        return MappingResult(mapping=mapping, latency=latency)
+        return MappingResult(mapping=mapping, latency=latency, allocation_tree=tree)
 
     elif strategy == "recursive_grid_search":
         strat = RecursiveGridSearchStrategy(**kwargs)

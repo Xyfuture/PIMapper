@@ -37,6 +37,7 @@ from ...core.hwspec import Accelerator
 from ...core.matrixspec import Mapping, MatrixShape
 from ..evaluator import evaluate
 from ...core.utils import MappingResult
+from ..utils import MatrixAllocationTree
 
 logger = logging.getLogger("h2llm_mapping")
 
@@ -72,7 +73,7 @@ class H2LLMTilingStrategy:
         self,
         matrix_shape: MatrixShape,
         accelerator: Accelerator,
-    ) -> Mapping:
+    ) -> Tuple[Mapping, MatrixAllocationTree]:
         """Create a mapping using H2-LLM's analytical tiling strategy.
 
         Args:
@@ -80,7 +81,7 @@ class H2LLMTilingStrategy:
             accelerator: Hardware accelerator configuration
 
         Returns:
-            Mapping object with optimized tile assignments
+            Tuple of (Mapping object with optimized tile assignments, MatrixAllocationTree)
 
         Raises:
             ValueError: If parameters are invalid
@@ -121,7 +122,7 @@ class H2LLMTilingStrategy:
         logger.debug(f"  This creates {T_K * T_N} tiles across {C} channels")
 
         # Create the mapping with calculated tiling
-        mapping = self._create_tiled_mapping(matrix_shape, accelerator, T_K, T_N)
+        mapping, tree = self._create_tiled_mapping(matrix_shape, accelerator, T_K, T_N)
 
         # Validate the mapping
         try:
@@ -131,7 +132,7 @@ class H2LLMTilingStrategy:
             logger.error(f"  Mapping validation failed: {e}")
             raise
 
-        return mapping
+        return mapping, tree
 
     def find_optimal_mapping(
         self,
@@ -150,10 +151,10 @@ class H2LLMTilingStrategy:
             MappingResult with mapping and latency, or None if mapping fails
         """
         try:
-            mapping = self.create_mapping(matrix_shape, accelerator)
+            mapping, tree = self.create_mapping(matrix_shape, accelerator)
             latency = evaluate(accelerator, mapping)
 
-            result = MappingResult(mapping=mapping, latency=latency)
+            result = MappingResult(mapping=mapping, latency=latency, allocation_tree=tree)
             utilization = result.get_compute_utilization()
 
             logger.debug(f"  Simulation complete: latency={latency:.2f}, utilization={utilization:.2%}")
@@ -311,7 +312,7 @@ class H2LLMTilingStrategy:
         accelerator: Accelerator,
         T_K: int,
         T_N: int,
-    ) -> Mapping:
+    ) -> Tuple[Mapping, MatrixAllocationTree]:
         """Create a mapping with specified tiling factors.
 
         The tiling strategy:
@@ -327,25 +328,37 @@ class H2LLMTilingStrategy:
             T_N: Tiling factor for column dimension
 
         Returns:
-            Mapping object with tile assignments
+            Tuple of (Mapping object with tile assignments, MatrixAllocationTree)
         """
         # Calculate tile boundaries
         row_bounds = self._split_dimension(matrix_shape.rows, T_K)
         col_bounds = self._split_dimension(matrix_shape.cols, T_N)
 
-        # For batch dimension, try to split if we have extra capacity
-        num_spatial_tiles = len(row_bounds) * len(col_bounds)
+        # Do not split batch dimension to avoid weight duplication (H2-LLM paper principle)
+        batch_bounds = [(0, matrix_shape.batch_size)]
         num_channels = len(accelerator.channels)
 
-        # Split batch if we have more channels than spatial tiles
-        batch_splits = max(1, min(matrix_shape.batch_size, num_channels // num_spatial_tiles))
-        batch_bounds = self._split_dimension(matrix_shape.batch_size, batch_splits)
-
-        logger.debug(f"    Row splits: {len(row_bounds)}, Col splits: {len(col_bounds)}, Batch splits: {len(batch_bounds)}")
+        logger.debug(f"    Row splits: {len(row_bounds)}, Col splits: {len(col_bounds)}, Batch splits: 1 (no split)")
 
         # Create mapping
         mapping = Mapping(matrix=matrix_shape, accelerator=accelerator)
         channel_ids = sorted(accelerator.channels.keys())
+
+        # Create allocation tree
+        tree = MatrixAllocationTree.create_root(
+            rows=matrix_shape.rows,
+            cols=matrix_shape.cols,
+            batch_size=matrix_shape.batch_size,
+            num_split_row=len(row_bounds),
+            num_split_col=len(col_bounds),
+            channel_ids=channel_ids
+        )
+
+        # Calculate total tiles (batch is not split, so only spatial tiles)
+        total_tiles = len(row_bounds) * len(col_bounds)
+
+        # Add leaf child with all tiles (single-level tree)
+        tree.root.add_leaf_child(num_tiles=total_tiles)
 
         # Distribute tiles in row-major order with round-robin assignment
         tile_idx = 0
@@ -359,7 +372,12 @@ class H2LLMTilingStrategy:
 
         logger.debug(f"    Created {tile_idx} tiles distributed across {num_channels} channels")
 
-        return mapping
+        # Assign tile IDs to the tree
+        success = tree.assign_tile_ids()
+        if not success:
+            logger.warning("Failed to assign tile IDs in H2LLM mapping")
+
+        return mapping, tree
 
     def _split_dimension(self, total: int, parts: int) -> List[Tuple[int, int]]:
         """Split a dimension into parts with balanced sizes.

@@ -9,8 +9,8 @@ class CommandBase:
     command_id: int = field(init=False)
 
     # DAG structure
-    input_commands: dict['CommandBase', None] = field(default_factory=dict)
-    output_commands: dict['CommandBase', None] = field(default_factory=dict)
+    # input_commands: dict['CommandBase', None] = field(default_factory=dict)
+    # output_commands: dict['CommandBase', None] = field(default_factory=dict)
 
     prev_commands: dict['CommandBase', None] = field(default_factory=dict)
     next_commands: dict['CommandBase', None] = field(default_factory=dict)
