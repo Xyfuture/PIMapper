@@ -225,3 +225,7 @@ stats = manager.run(graph, mode="sequential")
 - **Bandwidth Modes**: PIM channels support either separate input/output bandwidth OR shared bandwidth (mutually exclusive)
 - **Data Formats**: `DataFormat` specifies input/output/weight dtypes (FP16, INT8, INT4, FP8)
 - **Backwards Compatibility**: The codebase uses "PIM channel" terminology but maintains backwards compatibility with "compute die" and "chip" naming
+
+
+## MISC
+每次创建完一个 test的文件, 都要记录原始的 prompt 是什么, 方便之后进行阅读 

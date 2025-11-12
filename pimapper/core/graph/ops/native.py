@@ -143,6 +143,62 @@ class RMSNormOp(Op):
         raise ValueError(f"Cannot convert {torch_op} to RMSNormOp")
 
 
+class BatchedMatMulOp(Op):
+    """批量矩阵乘法操作 (with past KV cache)"""
+
+    op_type: ClassVar[str] = "batched_matmul"
+
+    def __init__(
+        self,
+        batch_size: int = 1,
+        num_matmuls: int = 1,
+        matmul_shape: Optional[tuple[int, int, int]] = None,  # (M, rows, cols)
+        is_qk_matmul: bool = True,
+        model_config: Optional[dict] = None,
+        inference_config: Optional[dict] = None
+    ):
+        """
+        Args:
+            batch_size: Batch size for the operation
+            num_matmuls: Number of parallel matmuls (typically num_attention_heads)
+            matmul_shape: Shape of each matmul as (M, rows, cols) where M is the sequence dimension
+            is_qk_matmul: True for Q@K^T, False for scores@V
+            model_config: Dictionary containing model configuration
+            inference_config: Dictionary containing inference configuration
+        """
+        super().__init__(kwargs={
+            "batch_size": batch_size,
+            "num_matmuls": num_matmuls,
+            "matmul_shape": matmul_shape,
+            "is_qk_matmul": is_qk_matmul,
+            "model_config": model_config,
+            "inference_config": inference_config
+        })
+
+    @classmethod
+    def convert_from_torch(cls, torch_op: Any) -> BatchedMatMulOp:
+        from pimapper.core.graph.ops.torch_compat import TorchCallModuleOp
+        if isinstance(torch_op, TorchCallModuleOp):
+            if torch_op.metadata and torch_op.metadata.get("custom", {}).get("module_class") == "BatchedMatMulWithPast":
+                # Extract configuration from metadata if available
+                custom_meta = torch_op.metadata.get("custom", {})
+
+                # Try to infer parameters from the module or metadata
+                batch_size = 1
+                num_matmuls = 1
+                matmul_shape = None
+                is_qk_matmul = True
+
+                # Create the op with available information
+                return cls(
+                    batch_size=batch_size,
+                    num_matmuls=num_matmuls,
+                    matmul_shape=matmul_shape,
+                    is_qk_matmul=is_qk_matmul
+                )
+        raise ValueError(f"Cannot convert {torch_op} to BatchedMatMulOp")
+
+
 # 注册所有原生操作
 NATIVE_OPS = [
     MatMulOp,
@@ -152,4 +208,5 @@ NATIVE_OPS = [
     SiLUOp,
     SoftmaxOp,
     RMSNormOp,
+    BatchedMatMulOp,
 ]

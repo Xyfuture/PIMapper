@@ -9,6 +9,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 @dataclass
+class InferenceConfig:
+    batch_size: int = 1
+    past_seq_len: int = 1024
+
+@dataclass
 class ModelConfig:
     hidden_size: int = 4096
     intermediate_size: int = 11008
@@ -28,11 +33,6 @@ class ModelConfig:
     @property
     def per_head_size(self):
         return self.hidden_size // self.num_attention_heads
-
-@dataclass
-class InferenceConfig:
-    batch_size: int = 1
-    past_sequence_length: int = 1024
 
 
 class RotaryPositionEmbedding(nn.Module):
@@ -78,6 +78,86 @@ class RotaryPositionEmbedding(nn.Module):
         ], dim=-1)  # (bsz, n_heads, seqlen, head_dim)
 
         return x_rotated
+
+
+class BatchedMatMulWithPast(nn.Module):
+    """Batched matrix multiplication with past KV cache.
+
+    This module performs batched matmul between input and past_matrix.
+    Used for attention computation: Q @ K^T or scores @ V.
+    """
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        inference_config: InferenceConfig,
+        is_qk_matmul: bool = True,
+        dtype=torch.float16
+    ):
+        super().__init__()
+        self.model_config = model_config
+        self.inference_config = inference_config
+        self.is_qk_matmul = is_qk_matmul
+        self.dtype = dtype
+
+        # Determine number of heads (handle GQA)
+        self.n_heads = model_config.num_attention_heads
+        if model_config.use_gqa:
+            self.n_kv_heads = model_config.num_key_value_heads
+        else:
+            self.n_kv_heads = self.n_heads
+
+        self.head_dim = model_config.per_head_size
+        batch_size = inference_config.batch_size
+        past_seq_len = inference_config.past_seq_len
+
+        # For Q @ K^T: input is (bsz, n_heads, seqlen, head_dim), past is (bsz, n_kv_heads, past_seq_len, head_dim)
+        # Output: (bsz, n_heads, seqlen, past_seq_len)
+        # For scores @ V: input is (bsz, n_heads, seqlen, past_seq_len), past is (bsz, n_kv_heads, past_seq_len, head_dim)
+        # Output: (bsz, n_heads, seqlen, head_dim)
+
+        if is_qk_matmul:
+            # Q @ K^T: past_matrix is K with shape (bsz, n_kv_heads, past_seq_len, head_dim)
+            past_shape = (batch_size, self.n_kv_heads, past_seq_len, self.head_dim)
+        else:
+            # scores @ V: past_matrix is V with shape (bsz, n_kv_heads, past_seq_len, head_dim)
+            past_shape = (batch_size, self.n_kv_heads, past_seq_len, self.head_dim)
+
+        # Register past_matrix as a buffer (not a parameter, won't be trained)
+        self.register_buffer('past_matrix', torch.zeros(past_shape, dtype=dtype))
+
+    def forward(self, input, coming_kv):
+        """
+        Args:
+            input: Query tensor (bsz, n_heads, seqlen, head_dim) for QK matmul
+                   or scores tensor (bsz, n_heads, seqlen, past_seq_len) for score-V matmul
+            coming_kv: New KV tensor (not used in computation, just passed through)
+
+        Returns:
+            Result of batched matmul between input and past_matrix
+        """
+        # coming_kv is not used in this operation, it's just for graph tracing
+
+        if self.is_qk_matmul:
+            # Q @ K^T: input (bsz, n_heads, seqlen, head_dim) @ past_matrix^T (bsz, n_kv_heads, head_dim, past_seq_len)
+            # Handle GQA by repeating KV heads if needed
+            past = self.past_matrix
+            if self.n_heads != self.n_kv_heads:
+                # Repeat KV heads to match Q heads
+                repeat_factor = self.n_heads // self.n_kv_heads
+                past = past.repeat_interleave(repeat_factor, dim=1)
+
+            # Transpose last two dims of past for K^T
+            result = torch.matmul(input, past.transpose(-2, -1))
+        else:
+            # scores @ V: input (bsz, n_heads, seqlen, past_seq_len) @ past_matrix (bsz, n_kv_heads, past_seq_len, head_dim)
+            past = self.past_matrix
+            if self.n_heads != self.n_kv_heads:
+                repeat_factor = self.n_heads // self.n_kv_heads
+                past = past.repeat_interleave(repeat_factor, dim=1)
+
+            result = torch.matmul(input, past)
+
+        return result
 
 
 
@@ -128,11 +208,13 @@ class FFNLayer(nn.Module):
 class LLaMALayer(nn.Module):
     def __init__(
         self,
-        model_config: ModelConfig
+        model_config: ModelConfig,
+        inference_config: InferenceConfig = None
     ):
         super().__init__()
 
         self.config = model_config
+        self.inference_config = inference_config if inference_config is not None else InferenceConfig()
 
         self.dim = model_config.hidden_size
         self.ffn_dim = model_config.intermediate_size
@@ -194,6 +276,20 @@ class LLaMALayer(nn.Module):
         # RoPE module
         self.rotary_emb = RotaryPositionEmbedding(self.head_dim, base=10000.0, dtype=self.dtype)
 
+        # BatchedMatMulWithPast modules for attention
+        self.qk_matmul = BatchedMatMulWithPast(
+            model_config=model_config,
+            inference_config=self.inference_config,
+            is_qk_matmul=True,
+            dtype=self.dtype
+        )
+        self.score_v_matmul = BatchedMatMulWithPast(
+            model_config=model_config,
+            inference_config=self.inference_config,
+            is_qk_matmul=False,
+            dtype=self.dtype
+        )
+
     def forward(self, x):
         bsz, seqlen, _ = x.shape
 
@@ -208,8 +304,12 @@ class LLaMALayer(nn.Module):
         xq = self.rotary_emb(xq)
         xk = self.rotary_emb(xk)
 
-        scores = torch.softmax(torch.matmul(xq, xk.transpose(2, 3)), dim=-1)
-        output = torch.matmul(scores, xv).transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        # Use BatchedMatMulWithPast for Q @ K^T
+        scores_raw = self.qk_matmul(xq, xk)  # (bsz, n_heads, seqlen, past_seq_len)
+        scores = torch.softmax(scores_raw, dim=-1)
+
+        # Use BatchedMatMulWithPast for scores @ V
+        output = self.score_v_matmul(scores, xv).transpose(1, 2).contiguous().view(bsz, seqlen, -1)
 
         xo = self.wo(output)
 

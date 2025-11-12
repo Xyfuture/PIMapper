@@ -9,7 +9,7 @@ from torch.fx.passes.shape_prop import ShapeProp
 from torch.nn.modules import Module
 
 from pimapper.core.graph.base import NxComputationGraph
-from pimapper.model.base import RotaryPositionEmbedding, load_model_config, initialize_module
+from pimapper.model.base import RotaryPositionEmbedding, BatchedMatMulWithPast, load_model_config, initialize_module
 from pimapper.core.graph.ops.base import GraphTensor
 from pimapper.core.graph.ops.torch_compat import create_torch_op_from_fx
 from pimapper.modelmapper.passes.normalize_ops import NormalizeOpsPass
@@ -19,7 +19,9 @@ from pimapper.modelmapper.passes.simplify import SimplifyGraphPass
 class NxGraphTracer(fx.Tracer):
 
     def is_leaf_module(self, m: Module, module_qualified_name: str) -> bool:
-        if isinstance(m,RotaryPositionEmbedding):
+        if isinstance(m, RotaryPositionEmbedding):
+            return True
+        if isinstance(m, BatchedMatMulWithPast):
             return True
         return super().is_leaf_module(m, module_qualified_name) 
 
