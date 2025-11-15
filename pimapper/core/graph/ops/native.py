@@ -180,21 +180,22 @@ class BatchedMatMulOp(Op):
         from pimapper.core.graph.ops.torch_compat import TorchCallModuleOp
         if isinstance(torch_op, TorchCallModuleOp):
             if torch_op.metadata and torch_op.metadata.get("custom", {}).get("module_class") == "BatchedMatMulWithPast":
-                # Extract configuration from metadata if available
                 custom_meta = torch_op.metadata.get("custom", {})
 
-                # Try to infer parameters from the module or metadata
-                batch_size = 1
-                num_matmuls = 1
-                matmul_shape = None
-                is_qk_matmul = True
+                batch_size = custom_meta.get("batch_size", 1)
+                num_matmuls = custom_meta.get("num_matmuls", 1)
+                matmul_shape = custom_meta.get("matmul_shape")
+                is_qk_matmul = custom_meta.get("is_qk_matmul", True)
+                model_config = custom_meta.get("model_config")
+                inference_config = custom_meta.get("inference_config")
 
-                # Create the op with available information
                 return cls(
                     batch_size=batch_size,
                     num_matmuls=num_matmuls,
                     matmul_shape=matmul_shape,
-                    is_qk_matmul=is_qk_matmul
+                    is_qk_matmul=is_qk_matmul,
+                    model_config=model_config,
+                    inference_config=inference_config
                 )
         raise ValueError(f"Cannot convert {torch_op} to BatchedMatMulOp")
 

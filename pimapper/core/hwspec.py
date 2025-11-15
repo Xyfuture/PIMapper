@@ -7,6 +7,24 @@ from typing import Callable, Dict, Optional
 
 
 @dataclass(frozen=True)
+class HostSpec:
+    """Immutable specification for a host processor.
+
+    Args:
+        vector_compute_power: Vector compute power in GFLOPS
+    """
+
+    vector_compute_power: float  # GFLOPS
+
+    def __post_init__(self) -> None:
+        if self.vector_compute_power <= 0:
+            raise ValueError("vector_compute_power must be positive")
+
+    def __str__(self) -> str:
+        return f"HostSpec(vector_compute={self.vector_compute_power}GFLOPS)"
+
+
+@dataclass(frozen=True)
 class PIMChannelSpec:
     """Immutable specification for a PIM channel.
 
@@ -93,6 +111,7 @@ class AcceleratorSpec:
 
     channel_count: int
     channel_spec: PIMChannelSpec
+    host_spec: Optional[HostSpec] = None
 
     def __post_init__(self) -> None:
         if self.channel_count <= 0:
@@ -118,11 +137,13 @@ class Host:
     """Runtime representation of a host processor that connects to PIM channels."""
 
     host_id: str
+    spec: Optional[HostSpec] = None
     meta: Dict[str, str] = field(default_factory=dict)
 
     def __str__(self) -> str:
+        spec_str = f", spec={self.spec}" if self.spec else ""
         meta_str = f", meta={self.meta}" if self.meta else ""
-        return f"Host({self.host_id}{meta_str})"
+        return f"Host({self.host_id}{spec_str}{meta_str})"
 
 
 @dataclass
@@ -183,7 +204,7 @@ class Accelerator:
             meta = meta_factory(idx) if meta_factory else {}
             channels[channel_id] = PIMChannel(channel_id=channel_id, spec=spec.channel_spec, meta=meta)
 
-        host = Host(host_id=host_id)
+        host = Host(host_id=host_id, spec=spec.host_spec)
         return cls(spec=spec, host=host, channels=channels)
 
     def add_channel(self, channel: PIMChannel) -> None:

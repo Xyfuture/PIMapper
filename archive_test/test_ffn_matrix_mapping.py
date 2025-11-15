@@ -12,7 +12,7 @@ This test:
 import torch
 from pathlib import Path
 
-from pimapper.model.base import load_model_config, FFNLayer
+from pimapper.model.base import load_model_config, FFNLayer, InferenceConfig
 from pimapper.modelmapper.converter import trace_module, fx_to_computation_graph
 from pimapper.modelmapper.passes.normalize_ops import NormalizeOpsPass
 from pimapper.modelmapper.passes.simplify import SimplifyGraphPass
@@ -36,6 +36,7 @@ def main():
 
     # Step 2: Initialize FFNLayer
     print("\n[Step 2] Initializing FFNLayer...")
+    inference_config = InferenceConfig(batch_size=20, past_seq_len=1024)
     ffn_layer = FFNLayer(config)
     ffn_layer.eval()
     print(f"  FFN Layer created with:")
@@ -45,14 +46,12 @@ def main():
 
     # Step 3: Trace and convert to computation graph
     print("\n[Step 3] Tracing FFNLayer to computation graph...")
-    batch_size = 20
-    seq_len = 1
     hidden_size = config.hidden_size
-    # Use float16 to match FFNLayer dtype
-    sample_input = torch.randn(batch_size, seq_len, hidden_size, dtype=torch.float16)
+    # Use float16 to match FFNLayer dtype, seq_len is always 1 for current token
+    sample_input = torch.randn(inference_config.batch_size, 1, hidden_size, dtype=torch.float16)
 
     # Trace the module
-    fx_graph = trace_module(ffn_layer, sample_inputs=(sample_input,))
+    fx_graph = trace_module(ffn_layer, sample_inputs=(sample_input,), inference_config=inference_config)
     print(f"  Traced {len(fx_graph.nodes)} FX nodes")
 
     # Convert to computation graph

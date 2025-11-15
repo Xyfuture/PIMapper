@@ -9,7 +9,7 @@ from torch.fx.passes.shape_prop import ShapeProp
 from torch.nn.modules import Module
 
 from pimapper.core.graph.base import NxComputationGraph
-from pimapper.model.base import RotaryPositionEmbedding, BatchedMatMulWithPast, load_model_config, initialize_module
+from pimapper.model.base import RotaryPositionEmbedding, BatchedMatMulWithPast, load_model_config, initialize_module, InferenceConfig
 from pimapper.core.graph.ops.base import GraphTensor
 from pimapper.core.graph.ops.torch_compat import create_torch_op_from_fx
 from pimapper.modelmapper.passes.normalize_ops import NormalizeOpsPass
@@ -26,19 +26,20 @@ class NxGraphTracer(fx.Tracer):
         return super().is_leaf_module(m, module_qualified_name) 
 
 
-def _create_sample_inputs(module: torch.nn.Module, batch_size: int = 1, seq_len: int = 4) -> tuple[torch.Tensor, ...]:
+def _create_sample_inputs(module: torch.nn.Module, inference_config: InferenceConfig = None) -> tuple[torch.Tensor, ...]:
     """Create sample inputs for shape propagation."""
+    if inference_config is None:
+        inference_config = InferenceConfig()
     hidden_size = module.config.hidden_size
-    return (torch.randn(batch_size, seq_len, hidden_size),)
+    # seq_len is always 1 for current token (not past_seq_len)
+    return (torch.randn(inference_config.batch_size, 1, hidden_size),)
 
 
 def trace_module(
     root: Union[torch.nn.Module, Callable[..., Any]],
     concrete_args: Optional[dict[str, Any]] = None,
     sample_inputs: Optional[tuple[torch.Tensor, ...]] = None,
-    *,
-    batch_size: int = 1,
-    seq_len: int = 4,
+    inference_config: Optional[InferenceConfig] = None,
 ) -> fx.Graph:
     """Symbolically trace a module and return the computation graph with shape information."""
     tracer = NxGraphTracer()
@@ -52,8 +53,7 @@ def trace_module(
 
     # If sample inputs are provided, use them; otherwise create dummy inputs
     if sample_inputs is None:
-        # Try to create symbolic batch size or use default values
-        sample_inputs = _create_sample_inputs(root, batch_size=batch_size, seq_len=seq_len)
+        sample_inputs = _create_sample_inputs(root, inference_config)
 
     try:
         shape_prop.propagate(*sample_inputs)
@@ -99,7 +99,7 @@ def _sanitize_meta(node: fx.Node) -> dict[str, Any]:
     return meta
 
 
-def fx_to_computation_graph(graph: fx.Graph, module: Optional[torch.nn.Module] = None) -> NxComputationGraph:
+def fx_to_computation_graph(graph: fx.Graph, module: Optional[torch.nn.Module] = None, inference_config: Optional[InferenceConfig] = None) -> NxComputationGraph:
     """Convert a torch.fx.Graph into a ComputationGraph using torch_compat ops.
 
     This function converts torch.fx graph nodes to torch_compat op representations,
@@ -108,6 +108,14 @@ def fx_to_computation_graph(graph: fx.Graph, module: Optional[torch.nn.Module] =
     Edges are automatically created by NxComputationGraph based on node references in args/kwargs.
     """
     comp_graph = NxComputationGraph()
+
+    # Store inference_config in graph metadata
+    if inference_config is not None:
+        comp_graph.metadata['inference_config'] = {
+            'batch_size': inference_config.batch_size,
+            'past_seq_len': inference_config.past_seq_len,
+            'data_format': inference_config.data_format  # Store DataFormat object
+        }
 
     # Get module mapping if available
     modules = dict(module.named_modules()) if module is not None else {}
@@ -158,6 +166,25 @@ def fx_to_computation_graph(graph: fx.Graph, module: Optional[torch.nn.Module] =
                 meta['in_features'] = target_module.in_features
                 meta['out_features'] = target_module.out_features
 
+            elif isinstance(target_module, BatchedMatMulWithPast):
+                meta['batch_size'] = target_module.input_batch_size
+                meta['num_matmuls'] = target_module.num_matmuls
+                meta['matmul_shape'] = target_module.matmul_shape
+                meta['is_qk_matmul'] = target_module.is_qk_matmul
+                meta['model_config'] = {
+                    'hidden_size': target_module.model_config.hidden_size,
+                    'intermediate_size': target_module.model_config.intermediate_size,
+                    'num_hidden_layers': target_module.model_config.num_hidden_layers,
+                    'num_attention_heads': target_module.model_config.num_attention_heads,
+                    'num_key_value_heads': target_module.model_config.num_key_value_heads,
+                    'vocab_size': target_module.model_config.vocab_size,
+                    'model_type': target_module.model_config.model_type
+                }
+                meta['inference_config'] = {
+                    'batch_size': target_module.inference_config.batch_size,
+                    'past_seq_len': target_module.inference_config.past_seq_len
+                }
+
         # Convert fx.Node references to string names in args and kwargs
         converted_args = convert_node_refs(node.args)
         converted_kwargs = convert_node_refs(node.kwargs)
@@ -177,8 +204,7 @@ def fx_to_computation_graph(graph: fx.Graph, module: Optional[torch.nn.Module] =
 def build_computation_graph(
     card_path: str | Path,
     *,
-    batch_size: int = 1,
-    seq_len: int = 4,
+    inference_config: Optional[InferenceConfig] = None,
     dtype: torch.dtype = torch.float32,
     device: torch.device | str = "cpu",
     normalize: bool = True,
@@ -188,8 +214,7 @@ def build_computation_graph(
 
     Args:
         card_path: Path to model configuration JSON file
-        batch_size: Batch size for sample inputs
-        seq_len: Sequence length for sample inputs
+        inference_config: InferenceConfig with batch_size and past_seq_len (defaults to batch_size=1, past_seq_len=1024)
         dtype: Data type for sample inputs
         device: Device for sample inputs
         normalize: Whether to apply NormalizeOpsPass (convert torch ops to native ops)
@@ -199,17 +224,21 @@ def build_computation_graph(
         Tuple of (torch.fx.Graph, NxComputationGraph)
         The NxComputationGraph will have normalized and/or simplified ops based on parameters.
     """
+    if inference_config is None:
+        inference_config = InferenceConfig()
+
     config = load_model_config(card_path)
-    module = initialize_module(config, dtype=dtype, device=device)
+    module = initialize_module(config, inference_config=inference_config, dtype=dtype, device=device)
 
     hidden_size = config.hidden_size
-    sample_input = torch.randn(batch_size, seq_len, hidden_size, dtype=dtype, device=device)
+    # seq_len is always 1 for current token (not past_seq_len)
+    sample_input = torch.randn(inference_config.batch_size, 1, hidden_size, dtype=dtype, device=device)
 
     # Step 1: Trace the module to get torch.fx graph
-    graph = trace_module(module, sample_inputs=(sample_input,))
+    graph = trace_module(module, sample_inputs=(sample_input,), inference_config=inference_config)
 
     # Step 2: Convert to NxComputationGraph (with torch_compat ops)
-    comp_graph = fx_to_computation_graph(graph, module)
+    comp_graph = fx_to_computation_graph(graph, module, inference_config=inference_config)
 
     # Step 3: Apply NormalizeOpsPass (torch_compat -> native ops)
     if normalize:

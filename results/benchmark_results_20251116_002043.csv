@@ -1,0 +1,19 @@
+model_name,batch_size,strategy,total_latency,matrix_ops_count,vector_ops_count,timestamp
+Meta-Llama-3-8B,16,h2llm,307695.0,9,5,2025-11-16 00:20:45
+Meta-Llama-3-8B,16,recursive_grid_search,209664.0,6,0,2025-11-16 00:21:06
+Meta-Llama-3-8B,32,h2llm,554571.0,9,5,2025-11-16 00:21:08
+Meta-Llama-3-8B,32,recursive_grid_search,358970.0,6,0,2025-11-16 00:21:32
+Meta-Llama-3-8B,64,h2llm,1109135.0,9,5,2025-11-16 00:21:34
+Meta-Llama-3-8B,64,recursive_grid_search,717942.0,6,0,2025-11-16 00:21:55
+Qwen3-4B,16,h2llm,179499.0,9,5,2025-11-16 00:21:56
+Qwen3-4B,16,recursive_grid_search,110049.0,6,0,2025-11-16 00:22:15
+Qwen3-4B,32,h2llm,333760.0,9,5,2025-11-16 00:22:16
+Qwen3-4B,32,recursive_grid_search,197833.0,6,0,2025-11-16 00:22:36
+Qwen3-4B,64,h2llm,667520.0,9,5,2025-11-16 00:22:37
+Qwen3-4B,64,recursive_grid_search,395668.0,6,0,2025-11-16 00:22:56
+Qwen3-8B,16,h2llm,286846.0,9,5,2025-11-16 00:22:57
+Qwen3-8B,16,recursive_grid_search,192310.0,6,0,2025-11-16 00:23:18
+Qwen3-8B,32,h2llm,519164.0,9,5,2025-11-16 00:23:19
+Qwen3-8B,32,recursive_grid_search,330729.0,6,0,2025-11-16 00:23:39
+Qwen3-8B,64,h2llm,1038324.0,9,5,2025-11-16 00:23:41
+Qwen3-8B,64,recursive_grid_search,661469.0,6,0,2025-11-16 00:24:01

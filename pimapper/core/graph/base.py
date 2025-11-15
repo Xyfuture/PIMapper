@@ -27,6 +27,7 @@ class NxComputationGraph:
         self.graph: nx.DiGraph = nx.DiGraph()
         self._order: int = 0
         self._name_counts: dict[str, int] = {}
+        self.metadata: dict[str, Any] = {}  # Store graph-level metadata
 
     # --------------------------------------------------------------------- utils
     def _next_order(self) -> int:

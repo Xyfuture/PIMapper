@@ -4,6 +4,8 @@ from typing import List, Optional, Tuple
 
 from ...core.hwspec import Accelerator
 from ...core.matrixspec import Mapping, MatrixShape
+from ...core.utils import MappingResult
+from ..evaluator import evaluate
 from ..utils import MatrixAllocationTree
 
 
@@ -74,6 +76,35 @@ class TrivialTilingStrategy:
             raise RuntimeError("Failed to assign tile IDs in trivial mapping")
 
         return mapping, tree
+
+    def find_optimal_mapping(
+        self,
+        matrix_shape: MatrixShape,
+        accelerator: Accelerator,
+        grid_rows: int,
+        grid_cols: int,
+    ) -> Optional[MappingResult]:
+        """Find the mapping and evaluate its performance.
+
+        This method creates the mapping with specified grid dimensions and evaluates it to get the latency.
+
+        Args:
+            matrix_shape: Matrix dimensions
+            accelerator: Hardware accelerator configuration
+            grid_rows: Number of row splits
+            grid_cols: Number of column splits
+
+        Returns:
+            MappingResult with mapping and latency, or None if mapping fails
+        """
+        try:
+            mapping, tree = self.create_mapping(matrix_shape, accelerator, grid_rows, grid_cols)
+            latency = evaluate(accelerator, mapping)
+
+            result = MappingResult(mapping=mapping, latency=latency, allocation_tree=tree)
+            return result
+        except Exception as e:
+            return None
 
     def create_balanced_mapping(
         self,

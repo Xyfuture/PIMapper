@@ -1,0 +1,215 @@
+[2025-11-15 23:34:38] INFO: ================================================================================
+[2025-11-15 23:34:38] INFO: Starting Strategy Benchmark Test
+[2025-11-15 23:34:38] INFO: ================================================================================
+[2025-11-15 23:34:38] INFO: Log file: logs\benchmark_20251115_233438.log
+[2025-11-15 23:34:38] INFO: CSV file: results\benchmark_results_20251115_233438.csv
+[2025-11-15 23:34:38] INFO: 
+[2025-11-15 23:34:38] INFO: Configuration:
+[2025-11-15 23:34:38] INFO:   Hardware: 8 channels, 4.0 TOPS compute
+[2025-11-15 23:34:38] INFO:   Inference: past_seq_len=1024, data_format=FP16
+[2025-11-15 23:34:38] INFO:   Strategies: ['h2llm', 'recursive_grid_search']
+[2025-11-15 23:34:38] INFO:   Models: ['Meta-Llama-3-8B', 'Qwen3-8B']
+[2025-11-15 23:34:38] INFO:   Batch sizes: [16, 32, 64]
+[2025-11-15 23:34:38] INFO: 
+[2025-11-15 23:34:38] INFO: ================================================================================
+[2025-11-15 23:34:38] INFO: Testing model: Meta-Llama-3-8B
+[2025-11-15 23:34:38] INFO: ================================================================================
+[2025-11-15 23:34:38] INFO: 
+Batch size: 16
+[2025-11-15 23:34:38] INFO: --------------------------------------------------------------------------------
+[2025-11-15 23:34:38] INFO: Building base computation graph for Meta-Llama-3-8B, batch_size=16
+[2025-11-15 23:34:38] INFO:   Model config: hidden_size=4096, intermediate_size=14336, num_attention_heads=32
+[2025-11-15 23:34:38] INFO:   Tracing module with input shape: torch.Size([16, 1, 4096])
+[2025-11-15 23:34:39] INFO:   Initial graph: 31 nodes
+[2025-11-15 23:34:39] INFO:   Running NormalizeOpsPass...
+[2025-11-15 23:34:39] INFO:     After normalization: 31 nodes
+[2025-11-15 23:34:39] INFO:   Running SimplifyGraphPass...
+[2025-11-15 23:34:39] INFO:     After simplification: 18 nodes
+[2025-11-15 23:34:39] INFO: 
+[Test 1/12] Strategy: h2llm
+[2025-11-15 23:34:39] INFO:   Running passes for strategy: h2llm
+[2025-11-15 23:34:39] INFO:     Running MatrixMappingPass with strategy=h2llm...
+[2025-11-15 23:34:39] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:34:39] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:34:39] INFO:     Total latency: 307695.000000 seconds
+[2025-11-15 23:34:39] INFO:     Matrix ops: 9, Vector ops: 5
+[2025-11-15 23:34:39] INFO:   ✓ Test completed successfully
+[2025-11-15 23:34:39] INFO: 
+[Test 2/12] Strategy: recursive_grid_search
+[2025-11-15 23:34:39] INFO:   Running passes for strategy: recursive_grid_search
+[2025-11-15 23:34:39] INFO:     Running MatrixFusionPass...
+[2025-11-15 23:34:39] INFO:       After fusion: 15 nodes
+[2025-11-15 23:34:39] INFO:     Running MatrixMappingPass with strategy=recursive_grid_search...
+[2025-11-15 23:35:05] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:35:05] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:35:05] INFO:     Total latency: 250391.000000 seconds
+[2025-11-15 23:35:05] INFO:     Matrix ops: 6, Vector ops: 5
+[2025-11-15 23:35:05] INFO:   ✓ Test completed successfully
+[2025-11-15 23:35:05] INFO: 
+Batch size: 32
+[2025-11-15 23:35:05] INFO: --------------------------------------------------------------------------------
+[2025-11-15 23:35:05] INFO: Building base computation graph for Meta-Llama-3-8B, batch_size=32
+[2025-11-15 23:35:05] INFO:   Model config: hidden_size=4096, intermediate_size=14336, num_attention_heads=32
+[2025-11-15 23:35:06] INFO:   Tracing module with input shape: torch.Size([32, 1, 4096])
+[2025-11-15 23:35:06] INFO:   Initial graph: 31 nodes
+[2025-11-15 23:35:06] INFO:   Running NormalizeOpsPass...
+[2025-11-15 23:35:06] INFO:     After normalization: 31 nodes
+[2025-11-15 23:35:06] INFO:   Running SimplifyGraphPass...
+[2025-11-15 23:35:06] INFO:     After simplification: 18 nodes
+[2025-11-15 23:35:06] INFO: 
+[Test 3/12] Strategy: h2llm
+[2025-11-15 23:35:06] INFO:   Running passes for strategy: h2llm
+[2025-11-15 23:35:06] INFO:     Running MatrixMappingPass with strategy=h2llm...
+[2025-11-15 23:35:06] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:35:06] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:35:06] INFO:     Total latency: 554571.000000 seconds
+[2025-11-15 23:35:06] INFO:     Matrix ops: 9, Vector ops: 5
+[2025-11-15 23:35:06] INFO:   ✓ Test completed successfully
+[2025-11-15 23:35:06] INFO: 
+[Test 4/12] Strategy: recursive_grid_search
+[2025-11-15 23:35:06] INFO:   Running passes for strategy: recursive_grid_search
+[2025-11-15 23:35:06] INFO:     Running MatrixFusionPass...
+[2025-11-15 23:35:06] INFO:       After fusion: 15 nodes
+[2025-11-15 23:35:06] INFO:     Running MatrixMappingPass with strategy=recursive_grid_search...
+[2025-11-15 23:35:35] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:35:35] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:35:35] INFO:     Total latency: 443893.000000 seconds
+[2025-11-15 23:35:35] INFO:     Matrix ops: 6, Vector ops: 5
+[2025-11-15 23:35:35] INFO:   ✓ Test completed successfully
+[2025-11-15 23:35:35] INFO: 
+Batch size: 64
+[2025-11-15 23:35:35] INFO: --------------------------------------------------------------------------------
+[2025-11-15 23:35:35] INFO: Building base computation graph for Meta-Llama-3-8B, batch_size=64
+[2025-11-15 23:35:35] INFO:   Model config: hidden_size=4096, intermediate_size=14336, num_attention_heads=32
+[2025-11-15 23:35:35] INFO:   Tracing module with input shape: torch.Size([64, 1, 4096])
+[2025-11-15 23:35:36] INFO:   Initial graph: 31 nodes
+[2025-11-15 23:35:36] INFO:   Running NormalizeOpsPass...
+[2025-11-15 23:35:36] INFO:     After normalization: 31 nodes
+[2025-11-15 23:35:36] INFO:   Running SimplifyGraphPass...
+[2025-11-15 23:35:36] INFO:     After simplification: 18 nodes
+[2025-11-15 23:35:36] INFO: 
+[Test 5/12] Strategy: h2llm
+[2025-11-15 23:35:36] INFO:   Running passes for strategy: h2llm
+[2025-11-15 23:35:36] INFO:     Running MatrixMappingPass with strategy=h2llm...
+[2025-11-15 23:35:37] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:35:37] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:35:37] INFO:     Total latency: 1109135.000000 seconds
+[2025-11-15 23:35:37] INFO:     Matrix ops: 9, Vector ops: 5
+[2025-11-15 23:35:37] INFO:   ✓ Test completed successfully
+[2025-11-15 23:35:37] INFO: 
+[Test 6/12] Strategy: recursive_grid_search
+[2025-11-15 23:35:37] INFO:   Running passes for strategy: recursive_grid_search
+[2025-11-15 23:35:37] INFO:     Running MatrixFusionPass...
+[2025-11-15 23:35:37] INFO:       After fusion: 15 nodes
+[2025-11-15 23:35:37] INFO:     Running MatrixMappingPass with strategy=recursive_grid_search...
+[2025-11-15 23:36:06] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:36:06] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:36:06] INFO:     Total latency: 887787.000000 seconds
+[2025-11-15 23:36:06] INFO:     Matrix ops: 6, Vector ops: 5
+[2025-11-15 23:36:06] INFO:   ✓ Test completed successfully
+[2025-11-15 23:36:06] INFO: ================================================================================
+[2025-11-15 23:36:06] INFO: Testing model: Qwen3-8B
+[2025-11-15 23:36:06] INFO: ================================================================================
+[2025-11-15 23:36:06] INFO: 
+Batch size: 16
+[2025-11-15 23:36:06] INFO: --------------------------------------------------------------------------------
+[2025-11-15 23:36:06] INFO: Building base computation graph for Qwen3-8B, batch_size=16
+[2025-11-15 23:36:06] INFO:   Model config: hidden_size=4096, intermediate_size=12288, num_attention_heads=32
+[2025-11-15 23:36:07] INFO:   Tracing module with input shape: torch.Size([16, 1, 4096])
+[2025-11-15 23:36:07] INFO:   Initial graph: 31 nodes
+[2025-11-15 23:36:07] INFO:   Running NormalizeOpsPass...
+[2025-11-15 23:36:07] INFO:     After normalization: 31 nodes
+[2025-11-15 23:36:07] INFO:   Running SimplifyGraphPass...
+[2025-11-15 23:36:07] INFO:     After simplification: 18 nodes
+[2025-11-15 23:36:07] INFO: 
+[Test 7/12] Strategy: h2llm
+[2025-11-15 23:36:07] INFO:   Running passes for strategy: h2llm
+[2025-11-15 23:36:07] INFO:     Running MatrixMappingPass with strategy=h2llm...
+[2025-11-15 23:36:07] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:36:07] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:36:07] INFO:     Total latency: 286846.000000 seconds
+[2025-11-15 23:36:07] INFO:     Matrix ops: 9, Vector ops: 5
+[2025-11-15 23:36:07] INFO:   ✓ Test completed successfully
+[2025-11-15 23:36:07] INFO: 
+[Test 8/12] Strategy: recursive_grid_search
+[2025-11-15 23:36:07] INFO:   Running passes for strategy: recursive_grid_search
+[2025-11-15 23:36:07] INFO:     Running MatrixFusionPass...
+[2025-11-15 23:36:07] INFO:       After fusion: 15 nodes
+[2025-11-15 23:36:07] INFO:     Running MatrixMappingPass with strategy=recursive_grid_search...
+[2025-11-15 23:36:39] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:36:39] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:36:39] INFO:     Total latency: 231843.000000 seconds
+[2025-11-15 23:36:39] INFO:     Matrix ops: 6, Vector ops: 5
+[2025-11-15 23:36:39] INFO:   ✓ Test completed successfully
+[2025-11-15 23:36:39] INFO: 
+Batch size: 32
+[2025-11-15 23:36:39] INFO: --------------------------------------------------------------------------------
+[2025-11-15 23:36:39] INFO: Building base computation graph for Qwen3-8B, batch_size=32
+[2025-11-15 23:36:39] INFO:   Model config: hidden_size=4096, intermediate_size=12288, num_attention_heads=32
+[2025-11-15 23:36:39] INFO:   Tracing module with input shape: torch.Size([32, 1, 4096])
+[2025-11-15 23:36:40] INFO:   Initial graph: 31 nodes
+[2025-11-15 23:36:40] INFO:   Running NormalizeOpsPass...
+[2025-11-15 23:36:40] INFO:     After normalization: 31 nodes
+[2025-11-15 23:36:40] INFO:   Running SimplifyGraphPass...
+[2025-11-15 23:36:40] INFO:     After simplification: 18 nodes
+[2025-11-15 23:36:40] INFO: 
+[Test 9/12] Strategy: h2llm
+[2025-11-15 23:36:40] INFO:   Running passes for strategy: h2llm
+[2025-11-15 23:36:40] INFO:     Running MatrixMappingPass with strategy=h2llm...
+[2025-11-15 23:36:40] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:36:40] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:36:40] INFO:     Total latency: 519164.000000 seconds
+[2025-11-15 23:36:40] INFO:     Matrix ops: 9, Vector ops: 5
+[2025-11-15 23:36:40] INFO:   ✓ Test completed successfully
+[2025-11-15 23:36:40] INFO: 
+[Test 10/12] Strategy: recursive_grid_search
+[2025-11-15 23:36:40] INFO:   Running passes for strategy: recursive_grid_search
+[2025-11-15 23:36:40] INFO:     Running MatrixFusionPass...
+[2025-11-15 23:36:40] INFO:       After fusion: 15 nodes
+[2025-11-15 23:36:40] INFO:     Running MatrixMappingPass with strategy=recursive_grid_search...
+[2025-11-15 23:37:04] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:37:04] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:37:04] INFO:     Total latency: 413273.000000 seconds
+[2025-11-15 23:37:04] INFO:     Matrix ops: 6, Vector ops: 5
+[2025-11-15 23:37:04] INFO:   ✓ Test completed successfully
+[2025-11-15 23:37:04] INFO: 
+Batch size: 64
+[2025-11-15 23:37:04] INFO: --------------------------------------------------------------------------------
+[2025-11-15 23:37:04] INFO: Building base computation graph for Qwen3-8B, batch_size=64
+[2025-11-15 23:37:04] INFO:   Model config: hidden_size=4096, intermediate_size=12288, num_attention_heads=32
+[2025-11-15 23:37:04] INFO:   Tracing module with input shape: torch.Size([64, 1, 4096])
+[2025-11-15 23:37:05] INFO:   Initial graph: 31 nodes
+[2025-11-15 23:37:05] INFO:   Running NormalizeOpsPass...
+[2025-11-15 23:37:05] INFO:     After normalization: 31 nodes
+[2025-11-15 23:37:05] INFO:   Running SimplifyGraphPass...
+[2025-11-15 23:37:05] INFO:     After simplification: 18 nodes
+[2025-11-15 23:37:05] INFO: 
+[Test 11/12] Strategy: h2llm
+[2025-11-15 23:37:05] INFO:   Running passes for strategy: h2llm
+[2025-11-15 23:37:05] INFO:     Running MatrixMappingPass with strategy=h2llm...
+[2025-11-15 23:37:05] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:37:05] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:37:05] INFO:     Total latency: 1038324.000000 seconds
+[2025-11-15 23:37:05] INFO:     Matrix ops: 9, Vector ops: 5
+[2025-11-15 23:37:05] INFO:   ✓ Test completed successfully
+[2025-11-15 23:37:05] INFO: 
+[Test 12/12] Strategy: recursive_grid_search
+[2025-11-15 23:37:05] INFO:   Running passes for strategy: recursive_grid_search
+[2025-11-15 23:37:05] INFO:     Running MatrixFusionPass...
+[2025-11-15 23:37:05] INFO:       After fusion: 15 nodes
+[2025-11-15 23:37:05] INFO:     Running MatrixMappingPass with strategy=recursive_grid_search...
+[2025-11-15 23:37:29] INFO:     Running VectorLatencyPass...
+[2025-11-15 23:37:29] INFO:     Running LatencyCalculationPass...
+[2025-11-15 23:37:29] INFO:     Total latency: 826553.000000 seconds
+[2025-11-15 23:37:29] INFO:     Matrix ops: 6, Vector ops: 5
+[2025-11-15 23:37:29] INFO:   ✓ Test completed successfully
+[2025-11-15 23:37:29] INFO: 
+[2025-11-15 23:37:29] INFO: ================================================================================
+[2025-11-15 23:37:29] INFO: Benchmark Test Completed
+[2025-11-15 23:37:29] INFO: ================================================================================
+[2025-11-15 23:37:29] INFO: Total tests: 12
+[2025-11-15 23:37:29] INFO: Successful tests: 12
+[2025-11-15 23:37:29] INFO: Failed tests: 0
+[2025-11-15 23:37:29] INFO: Results saved to: results\benchmark_results_20251115_233438.csv
+[2025-11-15 23:37:29] INFO: Log saved to: logs\benchmark_20251115_233438.log
+[2025-11-15 23:37:29] INFO: 

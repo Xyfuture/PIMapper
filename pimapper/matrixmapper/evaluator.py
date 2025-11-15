@@ -128,10 +128,10 @@ class BufferController:
 class PIMChannelModel(SimModule):
     """Simulated PIM channel for matrix mapping evaluation."""
 
-    def __init__(self, pim_channel: PIMChannel, tracer: PerfettoTracer, fifo_size: int = 2):
+    def __init__(self, pim_channel: PIMChannel, tracer: PerfettoTracer, fifo_size: int = 10):
         super().__init__()
 
-        self.fifo_size = fifo_size
+        self.fifo_size = 100
         self.tracer = tracer
         self.pim_channel: PIMChannel = pim_channel
         self.mapping: Optional[Mapping] = None
@@ -145,9 +145,9 @@ class PIMChannelModel(SimModule):
 
         self.shared_link_engine: Optional[SharedLinkEngine] = None
 
-        if self.pim_channel.spec.shared_bandwidth:
+        # if self.pim_channel.spec.shared_bandwidth:
             # Use shared bandwidth
-            self.shared_link_engine = SharedLinkEngine(self.pim_channel.spec.shared_bandwidth)
+        self.shared_link_engine = SharedLinkEngine(self.pim_channel.spec.get_input_bandwidth())
 
         self.input_buffer_controller = BufferController(self.fifo_size)
         self.output_buffer_controller = BufferController(self.fifo_size)

@@ -229,3 +229,7 @@ stats = manager.run(graph, mode="sequential")
 
 ## MISC
 每次创建完一个 test的文件, 都要记录原始的 prompt 是什么, 方便之后进行阅读 
+
+请你使用中文来说你做了什么以及准备要做什么
+
+在编写代码的时候不要过多进行fall back, 遇到一些非常规操作, 直接报错就好了, 写的简洁一些

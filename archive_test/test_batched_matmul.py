@@ -26,6 +26,7 @@
 from pathlib import Path
 from pimapper.modelmapper.converter import build_computation_graph
 from pimapper.core.graph.base import NxComputationGraph
+from pimapper.model.base import InferenceConfig
 
 
 def print_graph_summary(graph: NxComputationGraph, title: str = "Graph Summary") -> None:
@@ -90,6 +91,8 @@ def test_batched_matmul_integration():
 
     print(f"使用模型配置: {card_path}")
 
+    inference_config = InferenceConfig(batch_size=1, past_seq_len=1024)
+
     # 测试 1: 原始图 (torch ops) - 不进行归一化
     print("\n" + "=" * 80)
     print("测试 1: 原始图 (torch ops, 未归一化)")
@@ -97,8 +100,7 @@ def test_batched_matmul_integration():
 
     _, graph_raw = build_computation_graph(
         card_path,
-        batch_size=1,
-        seq_len=4,
+        inference_config=inference_config,
         normalize=False,
         simplify=False,
     )
@@ -122,8 +124,7 @@ def test_batched_matmul_integration():
 
     _, graph_norm = build_computation_graph(
         card_path,
-        batch_size=1,
-        seq_len=4,
+        inference_config=inference_config,
         normalize=True,
         simplify=False,
     )
@@ -151,8 +152,7 @@ def test_batched_matmul_integration():
 
     _, graph_final = build_computation_graph(
         card_path,
-        batch_size=1,
-        seq_len=4,
+        inference_config=inference_config,
         normalize=True,
         simplify=True,
     )

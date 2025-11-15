@@ -3,6 +3,7 @@
 from pathlib import Path
 from pimapper.modelmapper.converter import build_computation_graph
 from pimapper.modelmapper.passes.matrix_fusion import MatrixFusionPass
+from pimapper.model.base import InferenceConfig
 
 
 def test_matrix_fusion_on_llama():
@@ -18,10 +19,10 @@ def test_matrix_fusion_on_llama():
     print("=" * 80)
 
     # 构建归一化图（包含 native ops）
+    inference_config = InferenceConfig(batch_size=1, past_seq_len=1024)
     _, graph = build_computation_graph(
         card_path,
-        batch_size=1,
-        seq_len=4,
+        inference_config=inference_config,
         normalize=True,
         simplify=True,
     )

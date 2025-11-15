@@ -56,8 +56,6 @@ class H2LLMTilingStrategy:
     4. Distribute tiles across compute dies
     5. Validate and simulate the mapping
 
-    Attributes:
-        element_size: Size of each matrix element in bytes (default: 2 for FP16)
 
     Note:
         Bandwidth parameters are automatically extracted from the chip specification:
@@ -67,7 +65,6 @@ class H2LLMTilingStrategy:
         These methods handle both separate bandwidths and shared_bandwidth modes.
     """
 
-    element_size: float = field(default=2.0)  # bytes (FP16)
 
     def create_mapping(
         self,
@@ -163,73 +160,6 @@ class H2LLMTilingStrategy:
         except Exception as e:
             logger.error(f"  Failed to create optimal mapping: {e}")
             return None
-
-    def _calculate_optimal_tiling(
-        self,
-        M: int,
-        K: int,
-        N: int,
-        C: int,
-        load_bandwidth: float,
-        store_bandwidth: float,
-    ) -> Tuple[int, int]:
-        """Calculate optimal tiling factors using H2-LLM's analytical model.
-
-        From the paper (Section 4.2):
-        The optimal tiling factors minimize:
-            s × M × (K/(T_K × B_l) + N/(T_N × B_s))
-        subject to: T_K × T_N = C
-
-        Analytical solution:
-            T_K = sqrt(C × K × B_s / (N × B_l))
-            T_N = C / T_K
-
-        Args:
-            M: Batch/row dimension (not split in H2-LLM to avoid weight duplication)
-            K: Reduction dimension
-            N: Output feature dimension
-            C: Number of compute channels
-            load_bandwidth: Input/load bandwidth per channel (B_l)
-            store_bandwidth: Output/store bandwidth per channel (B_s)
-
-        Returns:
-            Tuple of (T_K, T_N) tiling factors
-        """
-        B_l = load_bandwidth
-        B_s = store_bandwidth
-
-        # Analytical solution from the paper
-        if N * B_l > 0:
-            T_K_float = sqrt(C * K * B_s / (N * B_l))
-        else:
-            T_K_float = sqrt(C)
-
-        # Round to nearest integer and ensure valid range
-        T_K = max(1, min(C, round(T_K_float)))
-        T_N = max(1, C // T_K)
-
-        # Adjust to ensure T_K * T_N <= C (don't over-partition)
-        while T_K * T_N > C and T_K > 1:
-            T_K -= 1
-            T_N = C // T_K
-
-        # If we still can't fit, try the other way
-        if T_K * T_N > C:
-            T_N = max(1, C // T_K)
-
-        # Ensure at least some partitioning if C > 1
-        if T_K * T_N < C and C > 1:
-            if T_N * (T_K + 1) <= C:
-                T_K += 1
-            elif T_K * (T_N + 1) <= C:
-                T_N += 1
-
-        assert T_K * T_N == C,  "Wrong dim divisor allocation"
-
-
-        logger.debug(f"    Analytical T_K={T_K_float:.2f} -> rounded T_K={T_K}, T_N={T_N}")
-
-        return T_K, T_N
 
     def _calculate_optimal_tiling_h2_paper(
         self,

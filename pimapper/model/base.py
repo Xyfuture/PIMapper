@@ -6,12 +6,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
+
+from pimapper.core.matrixspec import DataFormat
 
 @dataclass
 class InferenceConfig:
     batch_size: int = 1
     past_seq_len: int = 1024
+    data_format: Optional[DataFormat] = None
 
 @dataclass
 class ModelConfig:
@@ -84,7 +87,7 @@ class BatchedMatMulWithPast(nn.Module):
     """Batched matrix multiplication with past KV cache.
 
     This module performs batched matmul between input and past_matrix.
-    Used for attention computation: Q @ K^T or scores @ V.
+    Used for attention comput   ation: Q @ K^T or scores @ V.
     """
     def __init__(
         self,
@@ -124,6 +127,19 @@ class BatchedMatMulWithPast(nn.Module):
 
         # Register past_matrix as a buffer (not a parameter, won't be trained)
         self.register_buffer('past_matrix', torch.zeros(past_shape, dtype=dtype))
+
+
+        self.input_batch_size = self.inference_config.batch_size
+        self.num_matmuls = self.inference_config.batch_size * self.model_config.num_key_value_heads
+        
+        if self.is_qk_matmul:
+            self.matmul_shape = (self.model_config.num_attention_heads//self.model_config.num_key_value_heads,
+                                 self.head_dim,
+                                 self.inference_config.past_seq_len)
+        else:
+            self.matmul_shape = (self.model_config.num_attention_heads//self.model_config.num_key_value_heads,
+                                 self.inference_config.past_seq_len,
+                                 self.head_dim)
 
     def forward(self, input, coming_kv):
         """
@@ -351,11 +367,12 @@ def load_model_config(card_path: str | Path) -> ModelConfig:
 def initialize_module(
     config: ModelConfig,
     *,
+    inference_config: InferenceConfig = None,
     dtype: torch.dtype = torch.float32,
     device: torch.device | str = "cpu",
 ) -> torch.nn.Module:
     """Instantiate the LLaMA layer with the supplied configuration."""
-    module = LLaMALayer(config)
+    module = LLaMALayer(config, inference_config)
     module.eval()
     module.to(device=device, dtype=dtype)
 
