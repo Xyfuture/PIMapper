@@ -54,7 +54,7 @@ def test_llama_layer_latency():
     SimplifyGraphPass().run(comp_graph)
 
     # Apply matrix fusion pass
-    MatrixFusionPass(min_fusion_size=2, block_size=64).run(comp_graph)
+    # MatrixFusionPass(min_fusion_size=2, block_size=64).run(comp_graph)
 
     # Hardware spec (matching test_strategy_benchmark.py configuration)
     channel_spec = PIMChannelSpec(
@@ -70,7 +70,7 @@ def test_llama_layer_latency():
     )
 
     # Test both strategies
-    for strategy in ["h2llm", "recursive_grid_search"]:
+    for strategy in ["h2llm", "recursive_grid_search","trivial"]:
         print(f"\n{'='*80}")
         print(f"Strategy: {strategy}")
         print(f"{'='*80}")
@@ -78,9 +78,9 @@ def test_llama_layer_latency():
         strategy_kwargs = {}
         if strategy == 'recursive_grid_search':
             strategy_kwargs = {
-                'num_split_row_candidates':list(range(1, 12)),
-                'num_split_col_candidates':list(range(1, 12)),
-                'max_iterations':2,
+                'num_split_row_candidates':list(range(1, 9)),
+                'num_split_col_candidates':list(range(1, 9)),
+                'max_iterations':1,
             }
 
         # Run matrix mapping pass

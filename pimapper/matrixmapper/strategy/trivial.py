@@ -50,8 +50,7 @@ class TrivialTilingStrategy:
             cols=matrix_shape.cols,
             batch_size=matrix_shape.batch_size,
             num_split_row=grid_rows,
-            num_split_col=grid_cols,
-            channel_ids=channel_ids
+            num_split_col=grid_cols
         )
 
         # Add leaf child with all tiles (single-level tree)
@@ -69,11 +68,6 @@ class TrivialTilingStrategy:
                     tile_index += 1
 
         mapping.check_all()
-
-        # Assign tile IDs to the tree
-        success = tree.assign_tile_ids()
-        if not success:
-            raise RuntimeError("Failed to assign tile IDs in trivial mapping")
 
         return mapping, tree
 

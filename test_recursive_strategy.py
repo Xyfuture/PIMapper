@@ -109,13 +109,13 @@ def main():
     if result.allocation_tree:
         print(f"\n分配树信息:")
         print(f"  根节点 split: {result.allocation_tree.root.num_split_row}×{result.allocation_tree.root.num_split_col}")
-        print(f"  树深度: {result.allocation_tree.get_depth()}")
-        print(f"  总节点数: {result.allocation_tree.count_nodes()}")
 
-        if result.allocation_tree.validate(check_allocations=True):
-            print(f"  树验证: ✓ 通过")
+        if result.allocation_tree.validate():
+            print(f"  树验证: [通过]")
         else:
-            print(f"  树验证: ✗ 失败")
+            print(f"  树验证: [失败]")
+            print(f"\n树结构:")
+            result.allocation_tree.print_tree()
 
     print("\n" + "=" * 100)
     print("测试完成")

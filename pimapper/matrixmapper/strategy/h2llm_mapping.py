@@ -280,8 +280,7 @@ class H2LLMTilingStrategy:
             cols=matrix_shape.cols,
             batch_size=matrix_shape.batch_size,
             num_split_row=len(row_bounds),
-            num_split_col=len(col_bounds),
-            channel_ids=channel_ids
+            num_split_col=len(col_bounds)
         )
 
         # Calculate total tiles (batch is not split, so only spatial tiles)
@@ -301,11 +300,6 @@ class H2LLMTilingStrategy:
                     tile_idx += 1
 
         logger.debug(f"    Created {tile_idx} tiles distributed across {num_channels} channels")
-
-        # Assign tile IDs to the tree
-        success = tree.assign_tile_ids()
-        if not success:
-            logger.warning("Failed to assign tile IDs in H2LLM mapping")
 
         return mapping, tree
 

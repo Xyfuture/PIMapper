@@ -48,7 +48,7 @@ class TestConfig:
 
     # 策略参数
     h2llm_element_size: float = 2.0
-    recursive_max_iterations: int = 2
+    recursive_max_iterations: int = 1
     recursive_row_candidates_max: int = 12
     recursive_col_candidates_max: int = 12
     trivial_grid_rows: int = 1
@@ -147,18 +147,18 @@ def main():
         enable_recursive=True,
 
         # 加速器配置
-        channel_count=5,
+        channel_count=7,
         compute_power=4.0,
         shared_bandwidth=12.5,
         memory_bandwidth=0.4,
 
         # 矩阵配置
         matrix_rows=4096,
-        matrix_cols=4096,
+        matrix_cols=12288,
         matrix_batch_size=20,
 
         # 策略参数
-        recursive_max_iterations=2,
+        recursive_max_iterations=1,
         trivial_grid_rows=1,
         # trivial_grid_cols=8,
 

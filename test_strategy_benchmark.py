@@ -29,6 +29,8 @@ from pathlib import Path
 from datetime import datetime
 from copy import deepcopy
 from typing import Dict, List, Tuple, Any
+from multiprocessing import Pool, Manager
+import traceback
 
 from pimapper.model.base import load_model_config, initialize_module, InferenceConfig
 from pimapper.modelmapper.converter import trace_module, fx_to_computation_graph
@@ -270,15 +272,12 @@ def run_strategy_passes(
 
 def setup_csv_output() -> Tuple[Path, csv.DictWriter]:
     """Setup CSV output file and writer."""
-    # Create results directory
     results_dir = Path("results")
     results_dir.mkdir(exist_ok=True)
 
-    # Create CSV file with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_file = results_dir / f"benchmark_results_{timestamp}.csv"
 
-    # Open file and create writer
     file_handle = open(csv_file, 'w', newline='', encoding='utf-8')
     fieldnames = [
         'model_name',
@@ -287,9 +286,12 @@ def setup_csv_output() -> Tuple[Path, csv.DictWriter]:
         'total_latency',
         'matrix_ops_count',
         'vector_ops_count',
-        'timestamp'
+        'timestamp',
+        'success',
+        'error',
+        'traceback'
     ]
-    writer = csv.DictWriter(file_handle, fieldnames=fieldnames)
+    writer = csv.DictWriter(file_handle, fieldnames=fieldnames, extrasaction='ignore')
     writer.writeheader()
 
     return csv_file, writer, file_handle
@@ -299,21 +301,88 @@ def setup_csv_output() -> Tuple[Path, csv.DictWriter]:
 # Main Test Loop
 # ============================================================================
 
+def run_single_test(args):
+    """运行单个测试配置（在独立进程中执行）"""
+    model_name, batch_size, strategy_name, strategy_config = args
+
+    try:
+        # 构建基础计算图
+        card_path = Path(f"pimapper/model/model_cards/{model_name}.json")
+        config = load_model_config(card_path)
+
+        inference_config = InferenceConfig(
+            batch_size=batch_size,
+            past_seq_len=PAST_SEQ_LEN,
+            data_format=DATA_FORMAT
+        )
+
+        llama_layer = initialize_module(config, inference_config=inference_config, dtype=torch.float16)
+        llama_layer.eval()
+
+        sample_input = torch.randn(batch_size, 1, config.hidden_size, dtype=torch.float16)
+        fx_graph = trace_module(llama_layer, sample_inputs=(sample_input,), inference_config=inference_config)
+        comp_graph = fx_to_computation_graph(fx_graph, llama_layer, inference_config=inference_config)
+
+        NormalizeOpsPass().run(comp_graph)
+        SimplifyGraphPass().run(comp_graph)
+
+        # 运行策略特定的passes
+        if strategy_name == "recursive_grid_search":
+            fusion_pass = MatrixFusionPass(min_fusion_size=2, block_size=64)
+            fusion_pass.run(comp_graph)
+
+        mapping_pass = MatrixMappingPass(
+            accelerator_spec=ACCELERATOR_SPEC,
+            strategy=strategy_name,
+            strategy_kwargs=strategy_config,
+        )
+        mapping_pass.run(comp_graph)
+
+        if strategy_name != 'recursive_grid_search':
+            vector_pass = VectorLatencyPass(ACCELERATOR_SPEC.host_spec)
+            vector_pass.run(comp_graph)
+
+        latency_pass = LatencyCalculationPass()
+        latency_pass.run(comp_graph)
+        metadata = latency_pass.get_metadata()
+
+        return {
+            'model_name': model_name,
+            'batch_size': batch_size,
+            'strategy': strategy_name,
+            'total_latency': metadata['total_latency'],
+            'matrix_ops_count': metadata['matrix_ops_count'],
+            'vector_ops_count': metadata['vector_ops_count'],
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'success': True
+        }
+    except Exception as e:
+        return {
+            'model_name': model_name,
+            'batch_size': batch_size,
+            'strategy': strategy_name,
+            'total_latency': -1,
+            'matrix_ops_count': -1,
+            'vector_ops_count': -1,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }
+
+
 def run_benchmark():
-    """Run the complete benchmark test."""
-    # Setup logging
+    """运行完整的benchmark测试（多进程并行）"""
     logger, log_file = setup_logging()
     logger.info("="*80)
-    logger.info("Starting Strategy Benchmark Test")
+    logger.info("Starting Strategy Benchmark Test (Parallel)")
     logger.info("="*80)
     logger.info(f"Log file: {log_file}")
 
-    # Setup CSV output
     csv_file, csv_writer, csv_handle = setup_csv_output()
     logger.info(f"CSV file: {csv_file}")
     logger.info("")
 
-    # Print configuration
     logger.info("Configuration:")
     logger.info(f"  Hardware: {ACCELERATOR_SPEC.channel_count} channels, "
                 f"{CHANNEL_SPEC.compute_power} TOPS compute")
@@ -323,106 +392,46 @@ def run_benchmark():
     logger.info(f"  Batch sizes: {BATCH_SIZES}")
     logger.info("")
 
-    # Results collection
-    results = []
-    total_tests = len(MODELS) * len(BATCH_SIZES) * len(STRATEGIES)
-    current_test = 0
-
-    # Main test loop
+    # 生成所有测试配置
+    test_configs = []
     for model_name in MODELS:
-        logger.info("="*80)
-        logger.info(f"Testing model: {model_name}")
-        logger.info("="*80)
-
         for batch_size in BATCH_SIZES:
-            logger.info(f"\nBatch size: {batch_size}")
-            logger.info("-"*80)
+            for strategy_name, strategy_config in STRATEGIES.items():
+                test_configs.append((model_name, batch_size, strategy_name, strategy_config))
 
-            try:
-                # Build base computation graph (only once per model/batch_size)
-                base_graph = build_base_computation_graph(model_name, batch_size, logger)
+    total_tests = len(test_configs)
+    logger.info(f"Total tests: {total_tests}")
+    logger.info("Starting parallel execution...")
+    logger.info("")
 
-                for strategy_name, strategy_config in STRATEGIES.items():
-                    current_test += 1
-                    logger.info(f"\n[Test {current_test}/{total_tests}] Strategy: {strategy_name}")
+    # 使用多进程池并行执行
+    results = []
+    with Pool(processes=8) as pool:
+        for i, result in enumerate(pool.imap_unordered(run_single_test, test_configs), 1):
+            # 记录结果
+            results.append(result)
+            csv_writer.writerow(result)
+            csv_handle.flush()
 
-                    try:
-                        # Deep copy graph for this strategy
-                        graph_copy = deepcopy(base_graph)
+            # 打印进度
+            status = "✓" if result['success'] else "✗"
+            logger.info(f"[{i}/{total_tests}] {status} {result['model_name']} "
+                       f"batch={result['batch_size']} strategy={result['strategy']} "
+                       f"latency={result['total_latency']:.6f}s")
 
-                        # Run strategy-specific passes
-                        metadata = run_strategy_passes(
-                            graph_copy,
-                            strategy_name,
-                            strategy_config,
-                            ACCELERATOR_SPEC,
-                            logger
-                        )
+            if not result['success']:
+                logger.error(f"  Error: {result['error']}")
 
-                        # Record result
-                        result = {
-                            'model_name': model_name,
-                            'batch_size': batch_size,
-                            'strategy': strategy_name,
-                            'total_latency': metadata['total_latency'],
-                            'matrix_ops_count': metadata['matrix_ops_count'],
-                            'vector_ops_count': metadata['vector_ops_count'],
-                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        }
-                        results.append(result)
-
-                        # Write to CSV immediately
-                        csv_writer.writerow(result)
-                        csv_handle.flush()
-
-                        logger.info(f"  ✓ Test completed successfully")
-
-                    except Exception as e:
-                        logger.error(f"  ✗ Error in strategy {strategy_name}: {str(e)}", exc_info=True)
-                        # Record error result
-                        result = {
-                            'model_name': model_name,
-                            'batch_size': batch_size,
-                            'strategy': strategy_name,
-                            'total_latency': -1,  # Error indicator
-                            'matrix_ops_count': -1,
-                            'vector_ops_count': -1,
-                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        }
-                        results.append(result)
-                        csv_writer.writerow(result)
-                        csv_handle.flush()
-
-            except Exception as e:
-                logger.error(f"Error building graph for {model_name}, batch_size={batch_size}: {str(e)}",
-                           exc_info=True)
-                # Skip all strategies for this model/batch_size combination
-                for strategy_name in STRATEGIES.keys():
-                    current_test += 1
-                    result = {
-                        'model_name': model_name,
-                        'batch_size': batch_size,
-                        'strategy': strategy_name,
-                        'total_latency': -1,
-                        'matrix_ops_count': -1,
-                        'vector_ops_count': -1,
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    results.append(result)
-                    csv_writer.writerow(result)
-                    csv_handle.flush()
-
-    # Close CSV file
     csv_handle.close()
 
-    # Summary
+    # 汇总
     logger.info("")
     logger.info("="*80)
     logger.info("Benchmark Test Completed")
     logger.info("="*80)
     logger.info(f"Total tests: {total_tests}")
-    logger.info(f"Successful tests: {sum(1 for r in results if r['total_latency'] >= 0)}")
-    logger.info(f"Failed tests: {sum(1 for r in results if r['total_latency'] < 0)}")
+    logger.info(f"Successful tests: {sum(1 for r in results if r['success'])}")
+    logger.info(f"Failed tests: {sum(1 for r in results if not r['success'])}")
     logger.info(f"Results saved to: {csv_file}")
     logger.info(f"Log saved to: {log_file}")
     logger.info("")

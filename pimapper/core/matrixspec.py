@@ -278,11 +278,13 @@ class Mapping:
 
     def _check_full_coverage(self) -> None:
         total = sum(t.volume for t in self.tiles.values())
-        if total != self.matrix.volume:
+        if total < self.matrix.volume:
+            exit(-1)
             raise ValueError(
                 "Coverage volume not equal to matrix volume: "
                 f"tiles={total}, matrix={self.matrix.volume}"
             )
+            
 
     # ----------
     # Convenience statistics

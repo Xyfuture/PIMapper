@@ -153,7 +153,7 @@ class RecursiveGridSearchStrategy:
                 # print(f"  Estimated utilization: {estimated_util:.2%} Current best: {current_best_util:.2%}"   )
                 if estimated_latency > cur_best_latency:
                     self._log(current_iteration, f"    Pruned: estimated latency {estimated_latency:.4f} < best latency {cur_best_latency:.4f}")
-                    print(f"    Pruned: estimated latency {estimated_latency:.4f} < best latency {cur_best_latency:.4f}"   )
+                    # print(f"    Pruned: estimated latency {estimated_latency:.4f} < best latency {cur_best_latency:.4f}"   )
                     continue
 
             try:
@@ -298,36 +298,31 @@ class RecursiveGridSearchStrategy:
             return result
 
         # Handle tail tiles by constructing decomposition plan
-        sub_shapes = self._construct_tail_subregions(row_bounds, col_bounds, len(remaining_tiles), matrix.batch_size)
+        sub_regions = self._construct_tail_subregions(row_bounds, col_bounds, len(remaining_tiles), matrix.batch_size)
 
-        if not sub_shapes:
+        if not sub_regions:
             self._log(current_iteration, f"    Failed to construct tail subregions")
             return None
 
-        self._log(current_iteration, f"    Decomposed into {len(sub_shapes)} tail sub-regions")
+        self._log(current_iteration, f"    Decomposed into {len(sub_regions)} tail sub-regions")
 
         # Recursively solve each subregion
         sub_mappings: List[Mapping] = []
 
-        for i, sub_shape in enumerate(sub_shapes):
-            self._log(current_iteration, f"      Sub-region {i+1}: {sub_shape.rows}x{sub_shape.cols}x{sub_shape.batch_size}")
+        for i, (sub_shape, num_parent_tiles) in enumerate(sub_regions):
+            self._log(current_iteration, f"      Sub-region {i+1}: {sub_shape.rows}x{sub_shape.cols}x{sub_shape.batch_size}, occupies {num_parent_tiles} parent tiles")
 
             # Create internal child node for this tail region
-            # num_parent_tiles is the number of remaining tiles this sub-region covers
             child_node = current_node.add_internal_child(
                 rows=sub_shape.rows,
                 cols=sub_shape.cols,
                 batch_size=sub_shape.batch_size,
                 num_split_row=1,  # Will be updated by recursive call
                 num_split_col=1,
-                num_parent_tiles=len(remaining_tiles)  # All remaining tiles go to this child
+                num_parent_tiles=num_parent_tiles
             )
 
-            # Recursively solve this tail region, building tree on child_node
-            # We need to call _evaluate_split_configuration directly to pass the tree node
-            # But find_optimal_mapping doesn't support passing tree node yet
-            # So we need a different approach: let recursive call build its own tree,
-            # then copy the structure to child_node
+            # Recursively solve this tail region
             sub_result = self.find_optimal_mapping(
                 sub_shape,
                 accelerator,
@@ -374,17 +369,23 @@ class RecursiveGridSearchStrategy:
             return [(0, dimension)]
 
         base_size = dimension // num_splits
+        base_size = int(dimension/num_splits + 0.5)
         remainder = dimension % num_splits
 
         boundaries = []
         start = 0
 
+        # for i in range(num_splits):
+        #     # Distribute remainder to first `remainder` splits (ceiling operation)
+        #     size = base_size + (1 if i < remainder else 0)
+        #     end = start + size
+        #     boundaries.append((start, end))
+        #     start = end
         for i in range(num_splits):
-            # Distribute remainder to first `remainder` splits (ceiling operation)
-            size = base_size + (1 if i < remainder else 0)
-            end = start + size
-            boundaries.append((start, end))
+            end = start + base_size + 1 
+            boundaries.append((start,end))
             start = end
+
 
         return boundaries
 
@@ -407,8 +408,13 @@ class RecursiveGridSearchStrategy:
         col_bounds: List[Tuple[int, int]],
         num_remaining_tiles: int,
         batch_size: int,
-    ) -> List[MatrixShape]:
-        """返回单一确定性的分解方案，包含1-2个子区域"""
+    ) -> List[Tuple[MatrixShape, int]]:
+        """返回单一确定性的分解方案，包含1-2个子区域。
+
+        Returns:
+            List of (MatrixShape, num_tiles) tuples, where num_tiles is the number of
+            parent grid tiles this sub-region occupies.
+        """
         if num_remaining_tiles == 0:
             return []
 
@@ -425,7 +431,7 @@ class RecursiveGridSearchStrategy:
                     batch_size
                 )
                 if shape is not None:
-                    return [shape]
+                    return [(shape, num_remaining_tiles)]
 
         # Fallback：两矩阵方案（类似 ref_recursive.py）
         full_rows = num_remaining_tiles // g_cols
@@ -434,14 +440,14 @@ class RecursiveGridSearchStrategy:
         if suffix_cols > 0 and full_rows > 0:
             # 部分行 + 完整行
             regions = [
-                (g_rows - full_rows - 1, g_rows - full_rows, g_cols - suffix_cols, g_cols),
-                (g_rows - full_rows, g_rows, 0, g_cols)
+                (g_rows - full_rows - 1, g_rows - full_rows, g_cols - suffix_cols, g_cols, suffix_cols),
+                (g_rows - full_rows, g_rows, 0, g_cols, full_rows * g_cols)
             ]
             shapes = []
-            for r in regions:
-                shape = self._grid_rect_to_shape(row_bounds, col_bounds, *r, batch_size)
+            for r0, r1, c0, c1, n_tiles in regions:
+                shape = self._grid_rect_to_shape(row_bounds, col_bounds, r0, r1, c0, c1, batch_size)
                 if shape is not None:
-                    shapes.append(shape)
+                    shapes.append((shape, n_tiles))
             if len(shapes) == 2:
                 return shapes
 

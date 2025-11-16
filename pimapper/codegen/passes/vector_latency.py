@@ -21,7 +21,6 @@ VECTOR_OP_FLOPS = {
     "silu": 4.0,  # x * sigmoid(x) involves exp, division, multiply
     "softmax": 6.0,  # exp, sum, division per element
     "rmsnorm": 5.0,  # square, mean, sqrt, division, multiply
-    ""
 }
 
 
