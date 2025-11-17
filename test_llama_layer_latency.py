@@ -24,19 +24,20 @@ from pimapper.core.matrixspec import DataFormat, DataType
 
 def test_llama_layer_latency():
     # Load model config and create LLaMA layer
-    card_path = Path("pimapper/model/model_cards/Meta-Llama-3-8B.json")
+    # card_path = Path("pimapper/model/model_cards/Meta-Llama-3-8B.json")
+    card_path = Path("pimapper/model/model_cards/GLM4-32B.json")
     config = load_model_config(card_path)
 
     # Create data format (FP16)
     data_format = DataFormat(
         input_dtype=DataType.FP16,
         output_dtype=DataType.FP16,
-        weight_dtype=DataType.FP16
+        weight_dtype=DataType.INT4
     )
 
     # Create inference config with data format
     inference_config = InferenceConfig(
-        batch_size=20,
+        batch_size=16,
         past_seq_len=1024,
         data_format=data_format
     )
@@ -54,7 +55,7 @@ def test_llama_layer_latency():
     SimplifyGraphPass().run(comp_graph)
 
     # Apply matrix fusion pass
-    # MatrixFusionPass(min_fusion_size=2, block_size=64).run(comp_graph)
+    MatrixFusionPass(min_fusion_size=2, block_size=64).run(comp_graph)
 
     # Hardware spec (matching test_strategy_benchmark.py configuration)
     channel_spec = PIMChannelSpec(
@@ -93,7 +94,7 @@ def test_llama_layer_latency():
 
         # Run vector latency pass
         vector_pass = VectorLatencyPass(accelerator_spec.host_spec)
-        # vector_pass.run(comp_graph)
+        vector_pass.run(comp_graph)
 
         # Run latency calculation pass
         latency_pass = LatencyCalculationPass()

@@ -52,14 +52,15 @@ def setup_logging(log_dir: str = "logs") -> tuple:
 
 
 def setup_csv_output(results_dir: str = "results") -> tuple:
-    """Setup CSV output file and writer."""
+    """Setup temporary CSV output file and writer."""
     results_path = Path(results_dir)
     results_path.mkdir(exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_file = results_path / f"benchmark_results_{timestamp}.csv"
+    tmp_csv_file = results_path / f"benchmark_results_{timestamp}_tmp.csv"
+    final_csv_file = results_path / f"benchmark_results_{timestamp}.csv"
 
-    file_handle = open(csv_file, 'w', newline='', encoding='utf-8')
+    file_handle = open(tmp_csv_file, 'w', newline='', encoding='utf-8')
     fieldnames = [
         'model_name', 'batch_size', 'strategy', 'total_latency',
         'matrix_ops_count', 'vector_ops_count', 'timestamp',
@@ -68,7 +69,7 @@ def setup_csv_output(results_dir: str = "results") -> tuple:
     writer = csv.DictWriter(file_handle, fieldnames=fieldnames, extrasaction='ignore')
     writer.writeheader()
 
-    return csv_file, writer, file_handle
+    return tmp_csv_file, final_csv_file, writer, file_handle
 
 
 def run_single_test(args: tuple) -> Dict[str, Any]:
@@ -158,3 +159,24 @@ def log_latency_details(logger: logging.Logger, result: Dict[str, Any]):
             logger.info(f"    Output Shape: {detail['output_shape']}")
         logger.info(f"    Latency: {detail['latency']:.6f}")
         logger.info(f"    Cumulative: {detail['cumulative_latency']:.6f}")
+
+
+def finalize_csv(tmp_csv_file: Path, final_csv_file: Path, models: List[str], batch_sizes: List[int], strategies: List[str]):
+    """Sort results and write to final CSV, then delete temporary file."""
+    import pandas as pd
+
+    df = pd.read_csv(tmp_csv_file)
+
+    # Create categorical types for proper sorting
+    df['model_name'] = pd.Categorical(df['model_name'], categories=models, ordered=True)
+    df['batch_size'] = pd.Categorical(df['batch_size'], categories=batch_sizes, ordered=True)
+    df['strategy'] = pd.Categorical(df['strategy'], categories=strategies, ordered=True)
+
+    # Sort by model, batch_size, strategy
+    df_sorted = df.sort_values(['model_name', 'batch_size', 'strategy'])
+
+    # Write to final CSV
+    df_sorted.to_csv(final_csv_file, index=False)
+
+    # Delete temporary file
+    tmp_csv_file.unlink()

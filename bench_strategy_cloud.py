@@ -3,19 +3,19 @@
 Original prompt: 创建 bench_strategy_cloud.py 用于云服务器配置的策略测试
 """
 
-from multiprocessing import Pool
-from pimapper.utils.benchmark import setup_logging, setup_csv_output, run_single_test, log_latency_details
+import multiprocessing
+from pimapper.utils.benchmark import setup_logging, setup_csv_output, run_single_test, log_latency_details, finalize_csv
 from pimapper.core.hwspec import PIMChannelSpec, AcceleratorSpec, HostSpec
 from pimapper.core.matrixspec import DataFormat, DataType
 
 
 # Cloud server hardware configuration
-NUMBER_OF_CHANNELS = 8
+NUMBER_OF_CHANNELS = 12
 
 CHANNEL_SPEC = PIMChannelSpec(
-    compute_power=16,           # 8 TOPS (cloud server)
-    shared_bandwidth=20.8,       # 25.6 GB/s
-    memory_bandwidth=1.6,        # 800 GB/s
+    compute_power=4*2,           # 16 TOPS (cloud server)
+    shared_bandwidth=20.8,       # DDR5 5200MT/s
+    memory_bandwidth=0.4*2,        # 1.6 TB/s
 )
 
 HOST_SPEC = HostSpec(
@@ -42,11 +42,12 @@ STRATEGIES = {
     "recursive_grid_search": {
         "num_split_row_candidates": list(range(1, 9)),
         "num_split_col_candidates": list(range(1, 9)),
-        "max_iterations": 2,
-    }
+        "max_iterations": 1,
+    },
+    "trivial":{}, 
 }
 
-MODELS = ["Qwen3-32B","Yi-34B","Meta-Llama-3-70B"]
+MODELS = ["Qwen3-32B","GLM4-32B","Yi-34B","Meta-Llama-3-70B"]
 BATCH_SIZES = [16, 32, 64]
 
 
@@ -58,8 +59,8 @@ def run_benchmark():
     logger.info("="*80)
     logger.info(f"Log file: {log_file}")
 
-    csv_file, csv_writer, csv_handle = setup_csv_output()
-    logger.info(f"CSV file: {csv_file}")
+    tmp_csv_file, final_csv_file, csv_writer, csv_handle = setup_csv_output()
+    logger.info(f"CSV file: {final_csv_file}")
     logger.info("")
 
     logger.info("Configuration:")
@@ -83,8 +84,21 @@ def run_benchmark():
     logger.info("")
 
     results = []
-    with Pool(processes=8) as pool:
-        for i, result in enumerate(pool.imap_unordered(run_single_test, test_configs), 1):
+    pool = multiprocessing.Pool(processes=4)
+    try:
+        async_results = [pool.apply_async(run_single_test, (config,)) for config in test_configs]
+
+        for i, async_result in enumerate(async_results, 1):
+            try:
+                result = async_result.get()
+            except Exception as e:
+                model, batch, strategy = test_configs[i-1][:3]
+                result = {
+                    'model_name': model, 'batch_size': batch, 'strategy': strategy,
+                    'total_latency': -1, 'matrix_ops_count': -1, 'vector_ops_count': -1,
+                    'success': False, 'error': f'Process crashed: {str(e)}'
+                }
+
             results.append(result)
             csv_writer.writerow(result)
             csv_handle.flush()
@@ -98,8 +112,15 @@ def run_benchmark():
                 logger.error(f"  Error: {result['error']}")
             else:
                 log_latency_details(logger, result)
+    finally:
+        pool.close()
+        pool.terminate()
+        pool.join()
+        csv_handle.close()
 
-    csv_handle.close()
+    # Sort and finalize CSV
+    logger.info("\nFinalizing results...")
+    finalize_csv(tmp_csv_file, final_csv_file, MODELS, BATCH_SIZES, list(STRATEGIES.keys()))
 
     logger.info("")
     logger.info("="*80)
@@ -108,11 +129,13 @@ def run_benchmark():
     logger.info(f"Total tests: {total_tests}")
     logger.info(f"Successful: {sum(1 for r in results if r['success'])}")
     logger.info(f"Failed: {sum(1 for r in results if not r['success'])}")
-    logger.info(f"Results: {csv_file}")
+    logger.info(f"Results: {final_csv_file}")
     logger.info(f"Log: {log_file}")
 
     return results
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    multiprocessing.set_start_method('spawn', force=True)
     run_benchmark()
